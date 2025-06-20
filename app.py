@@ -1,7 +1,7 @@
 import streamlit as st
 from model_adapters import run_heuristic_exposure, run_rl_exposure, check_model_dependencies
 
-st.title("電影推薦問答機器人")
+st.title("電影推薦系統")
 st.write("你好！我是你的電影推薦小幫手。")
 
 # 檢查依賴
