@@ -4,11 +4,72 @@ import subprocess
 import torch
 import numpy as np
 import networkx as nx
+import pandas as pd
+import time
 from pathlib import Path
 
 # Add RL_recommender to Python path
 RL_RECOMMENDER_PATH = Path("../RL_recommender").resolve()
 sys.path.append(str(RL_RECOMMENDER_PATH))
+
+def build_nx_graph_with_output(output_container=None):
+    """
+    建立用戶-電影網絡圖，支持 Streamlit 輸出
+    """
+    ratings_file = "data/train.dat"
+
+    try:
+        ratings = pd.read_csv(ratings_file,
+                            sep=',',
+                            engine='python',
+                            names=['UserID', 'MovieID', 'Rating', 'Timestamp'],
+                            encoding='ISO-8859-1')
+    except FileNotFoundError:
+        error_msg = f"錯誤：找不到檔案 {ratings_file}"
+        if output_container:
+            output_container.error(error_msg)
+        raise FileNotFoundError(error_msg)
+
+    if output_container:
+        output_container.text(f"成功載入 {len(ratings)} 筆評分資料")
+
+    # 建立使用者-電影 雙邊圖 (Bipartite Graph)
+    if output_container:
+        output_container.text("建立使用者-電影 雙邊圖...")
+    
+    start_time = time.time()
+    B = nx.Graph()
+
+    # 添加節點，並標記節點類型 (bipartite=0 for users, bipartite=1 for movies)
+    users = sorted(ratings['UserID'].unique())
+    movies = sorted(ratings['MovieID'].unique())
+    
+    for uid in users:
+        B.add_node(f"u{uid}", bipartite=0)
+
+    for mid in movies:
+        B.add_node(f"m{mid}", bipartite=1)
+
+    edges = [(f"u{row['UserID']}", f"m{row['MovieID']}")
+            for _, row in ratings.iterrows()]
+    B.add_edges_from(edges)
+    
+    end_time = time.time()
+    
+    if output_container:
+        output_container.text(f"圖建立完成。耗時: {end_time - start_time:.2f} 秒")
+        output_container.text(f"節點數量: {B.number_of_nodes()} (Users: {len(users)}, Movies: {len(movies)})")
+        output_container.text(f"邊數量: {B.number_of_edges()}")
+
+    # 檢查圖是否連通
+    if nx.is_connected(B):
+        if output_container:
+            output_container.text("圖是連通的")
+    else:
+        if output_container:
+            output_container.text("圖不是連通的，將個別偵測社群")
+    
+    return B
 
 def heuristic_exposure_strategy_wrapper(user_item_graph, rec_item_set, item_emb, output_container=None,
                                        n_selected_communities=2,
@@ -134,7 +195,21 @@ def heuristic_exposure_strategy_wrapper(user_item_graph, rec_item_set, item_emb,
     
     return all_selected_items
 
-def run_heuristic_exposure(output_container=None):
+def get_user_recommendations(user_embeddings, item_embeddings, user_id, num_recommendations=5):
+    """
+    為特定用戶生成電影推薦
+    """
+    with torch.no_grad():
+        # 計算用戶和所有電影的相似度
+        user_emb = user_embeddings[user_id].unsqueeze(0)  # shape: (1, emb_dim)
+        scores = torch.mm(user_emb, item_embeddings.t()).squeeze()  # shape: (num_items,)
+        
+        # 獲取 top-k 推薦
+        _, top_items = torch.topk(scores, num_recommendations)
+        
+        return top_items.cpu().numpy(), scores[top_items].cpu().numpy()
+
+def run_heuristic_exposure(output_container=None, target_user_id=None, num_recommendations=5):
     """
     運行 Heuristic Exposure 模型的包裝函數
     """
@@ -153,9 +228,8 @@ def run_heuristic_exposure(output_container=None):
         if output_container:
             output_container.text("正在載入必要模組...")
         
-        # 直接導入並執行函數
+        # 直接使用我們自己的函數
         try:
-            from utility.build_nx_graph import build_nx_graph
             
             if output_container:
                 output_container.text("正在載入模型文件...")
@@ -167,44 +241,92 @@ def run_heuristic_exposure(output_container=None):
             if output_container:
                 output_container.text(f"成功載入模型: {user_embeddings.shape[0]} 個用戶, {item_embeddings.shape[0]} 個電影")
             
-            # 創建推薦項目集合
-            rec_item_set = [np.random.choice(range(item_embeddings.shape[0]), size=20, replace=False).tolist() 
-                           for user in range(user_embeddings.shape[0])]
-            
-            if output_container:
-                output_container.text("正在建立用戶-電影網絡...")
-            
-            user_item_graph = build_nx_graph()
-            
-            if output_container:
-                output_container.text("正在執行 Heuristic Exposure 策略...")
-            
-            # 執行我們自己的模型函數
-            selected_items = heuristic_exposure_strategy_wrapper(
-                user_item_graph, rec_item_set, item_embeddings, output_container
-            )
-            
-            # 切換回原目錄
-            os.chdir(original_dir)
-            
-            if output_container:
-                output_container.success("Heuristic Exposure 模型執行成功！")
-                output_container.subheader("推薦結果摘要")
-                output_container.text(f"🎬 總共生成了 {len(selected_items)} 個推薦配對")
+            # 檢查用戶ID是否有效
+            if target_user_id is not None:
+                if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+                    error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+                    if output_container:
+                        output_container.error(error_msg)
+                    os.chdir(original_dir)
+                    return error_msg
                 
-                if len(selected_items) > 0:
-                    unique_users = len(set([item[0] for item in selected_items]))
-                    unique_movies = len(set([item[1] for item in selected_items]))
-                    output_container.text(f"👥 涉及用戶數量: {unique_users}")
-                    output_container.text(f"🎭 涉及電影數量: {unique_movies}")
+                # 為特定用戶生成推薦
+                if output_container:
+                    output_container.text(f"正在為用戶 {target_user_id} 生成推薦...")
+                
+                recommended_items, scores = get_user_recommendations(
+                    user_embeddings, item_embeddings, target_user_id, num_recommendations
+                )
+                
+                # 切換回原目錄
+                os.chdir(original_dir)
+                
+                if output_container:
+                    output_container.success("個人化推薦完成！")
+                    output_container.subheader(f"🎬 為用戶 {target_user_id} 推薦的電影")
                     
-                    output_container.subheader("推薦範例（前10個）")
-                    for i, (user_id, movie_id) in enumerate(selected_items[:10]):
-                        output_container.text(f"用戶 {user_id} → 電影 {movie_id}")
-                else:
-                    output_container.warning("沒有生成任何推薦配對")
+                    # 創建推薦結果表格
+                    import pandas as pd
+                    recommendations_df = pd.DataFrame({
+                        '排名': range(1, len(recommended_items) + 1),
+                        '電影ID': recommended_items,
+                        '推薦分數': [f"{score:.4f}" for score in scores]
+                    })
+                    
+                    output_container.dataframe(recommendations_df, use_container_width=True)
+                    
+                                    # 顯示推薦詳情
+                output_container.subheader("📊 推薦詳情")
+                
+                # 使用列表方式顯示所有推薦
+                recommendation_text = ""
+                for i, (movie_id, score) in enumerate(zip(recommended_items, scores)):
+                    recommendation_text += f"🎭 第 {i+1} 名：電影 {movie_id} (分數: {score:.4f})\n"
+                
+                output_container.text(recommendation_text)
+                
+                return f"成功為用戶 {target_user_id} 推薦了 {len(recommended_items)} 部電影"
+                
+            else:
+                # 原始的批量推薦邏輯
+                # 創建推薦項目集合
+                rec_item_set = [np.random.choice(range(item_embeddings.shape[0]), size=20, replace=False).tolist() 
+                               for user in range(user_embeddings.shape[0])]
+                
+                if output_container:
+                    output_container.text("正在建立用戶-電影網絡...")
+                
+                user_item_graph = build_nx_graph_with_output(output_container)
+                
+                if output_container:
+                    output_container.text("正在執行 Heuristic Exposure 策略...")
+                
+                # 執行我們自己的模型函數
+                selected_items = heuristic_exposure_strategy_wrapper(
+                    user_item_graph, rec_item_set, item_embeddings, output_container
+                )
+                
+                # 切換回原目錄
+                os.chdir(original_dir)
+                
+                if output_container:
+                    output_container.success("Heuristic Exposure 模型執行成功！")
+                    output_container.subheader("推薦結果摘要")
+                    output_container.text(f"🎬 總共生成了 {len(selected_items)} 個推薦配對")
+                    
+                    if len(selected_items) > 0:
+                        unique_users = len(set([item[0] for item in selected_items]))
+                        unique_movies = len(set([item[1] for item in selected_items]))
+                        output_container.text(f"👥 涉及用戶數量: {unique_users}")
+                        output_container.text(f"🎭 涉及電影數量: {unique_movies}")
                         
-            return f"成功生成 {len(selected_items)} 個推薦配對"
+                        output_container.subheader("推薦範例（前10個）")
+                        for i, (user_id, movie_id) in enumerate(selected_items[:10]):
+                            output_container.text(f"用戶 {user_id} → 電影 {movie_id}")
+                    else:
+                        output_container.warning("沒有生成任何推薦配對")
+                            
+                return f"成功生成 {len(selected_items)} 個推薦配對"
             
         except ImportError as e:
             error_msg = f"模組導入失敗: {str(e)}"
@@ -223,73 +345,132 @@ def run_heuristic_exposure(output_container=None):
         error_msg = f"模型執行出錯: {str(e)}"
         if output_container:
             output_container.error(error_msg)
-        try:
-            os.chdir(original_dir)
-        except:
-            pass
+        os.chdir(original_dir)
         return error_msg
 
-def run_rl_exposure(output_container=None):
-    """
-    運行 RL Exposure 模型的包裝函數
-    
-    參數:
-    output_container: Streamlit 容器，用於顯示輸出
-    
-    返回:
-    results: 模型運行結果
-    """
+def run_rl_exposure(output_container=None, target_user_id=None, num_recommendations=5):
     if output_container:
         output_container.text("正在啟動 RL Exposure 模型...")
-        output_container.info("注意：RL 模型需要更長的執行時間，請耐心等待...")
-    
-    try:
-        # 切換到 RL_recommender 目錄
-        original_dir = os.getcwd()
-        os.chdir(RL_RECOMMENDER_PATH)
         
+    # 如果指定了特定用戶，使用簡化的推薦邏輯
+    if target_user_id is not None:
         if output_container:
-            output_container.text("正在執行模型...")
+            output_container.info("使用基於 RL 嵌入的個人化推薦...")
         
-        # 運行 RL exposure 腳本
-        result = subprocess.run(
-            [sys.executable, "exposure_method/rl_exposure_main.py"],
-            capture_output=True,
-            text=True,
-            timeout=600  # 10分鐘超時（RL訓練可能需要更長時間）
-        )
-        
-        # 切換回原目錄
-        os.chdir(original_dir)
-        
-        if result.returncode == 0:
+        try:
+            # 切換到 RL_recommender 目錄
+            original_dir = os.getcwd()
+            os.chdir(RL_RECOMMENDER_PATH)
+            
             if output_container:
-                output_container.success("RL Exposure 模型執行成功！")
-                output_container.text("輸出結果：")
-                output_container.code(result.stdout)
-            return result.stdout
-        else:
-            error_msg = f"模型執行失敗: {result.stderr}"
+                output_container.text("正在載入 RL 訓練的嵌入...")
+            
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            user_embeddings = torch.load("model/simulator/user_emb.pt", map_location=device, weights_only=True)
+            item_embeddings = torch.load("model/simulator/item_emb.pt", map_location=device, weights_only=True)
+            
+            if output_container:
+                output_container.text(f"成功載入模型: {user_embeddings.shape[0]} 個用戶, {item_embeddings.shape[0]} 個電影")
+            
+            # 檢查用戶ID是否有效
+            if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+                error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+                if output_container:
+                    output_container.error(error_msg)
+                os.chdir(original_dir)
+                return error_msg
+            
+            # 為特定用戶生成推薦（使用 RL 優化的嵌入）
+            if output_container:
+                output_container.text(f"正在為用戶 {target_user_id} 生成 RL 優化推薦...")
+            
+            recommended_items, scores = get_user_recommendations(
+                user_embeddings, item_embeddings, target_user_id, num_recommendations
+            )
+            
+            # 切換回原目錄
+            os.chdir(original_dir)
+            
+            if output_container:
+                output_container.success("RL 個人化推薦完成！")
+                output_container.subheader(f"🤖 為用戶 {target_user_id} 的 RL 推薦結果")
+                
+                # 創建推薦結果表格
+                recommendations_df = pd.DataFrame({
+                    '排名': range(1, len(recommended_items) + 1),
+                    '電影ID': recommended_items,
+                    'RL 分數': [f"{score:.4f}" for score in scores]
+                })
+                
+                output_container.dataframe(recommendations_df, use_container_width=True)
+                
+                # 顯示推薦詳情
+                output_container.subheader("🧠 RL 推薦詳情")
+                
+                # 使用列表方式顯示所有推薦
+                recommendation_text = ""
+                for i, (movie_id, score) in enumerate(zip(recommended_items, scores)):
+                    recommendation_text += f"🤖 第 {i+1} 名：電影 {movie_id} (RL分數: {score:.4f})\n"
+                
+                output_container.text(recommendation_text)
+            
+            return f"成功為用戶 {target_user_id} 生成了 {len(recommended_items)} 部 RL 推薦電影"
+            
+        except Exception as e:
+            error_msg = f"RL 個人化推薦執行出錯: {str(e)}"
             if output_container:
                 output_container.error(error_msg)
-            return error_msg
-            
-    except subprocess.TimeoutExpired:
-        error_msg = "模型執行超時（超過10分鐘）"
-        if output_container:
-            output_container.error(error_msg)
-        return error_msg
-    except Exception as e:
-        error_msg = f"模型執行出錯: {str(e)}"
-        if output_container:
-            output_container.error(error_msg)
-        return error_msg
-    finally:
-        # 確保切換回原目錄
-        try:
             os.chdir(original_dir)
-        except:
-            pass
+            return error_msg
+    
+    else:
+        # 原始的完整 RL 訓練邏輯
+        if output_container:
+            output_container.info("注意：完整 RL 模型需要更長的執行時間，請耐心等待...")
+        
+        try:
+            # 切換到 RL_recommender 目錄
+            original_dir = os.getcwd()
+            os.chdir(RL_RECOMMENDER_PATH)
+            
+            if output_container:
+                output_container.text("正在執行完整 RL 訓練...")
+            
+            # 運行 RL exposure 腳本
+            result = subprocess.run(
+                [sys.executable, "exposure_method/rl_exposure_main.py"],
+                capture_output=True,
+                text=True,
+                timeout=600  # 10分鐘超時（RL訓練可能需要更長時間）
+            )
+            
+            # 切換回原目錄
+            os.chdir(original_dir)
+            
+            if result.returncode == 0:
+                if output_container:
+                    output_container.success("RL Exposure 模型執行成功！")
+                    output_container.text("輸出結果：")
+                    output_container.code(result.stdout)
+                return result.stdout
+            else:
+                error_msg = f"模型執行失敗: {result.stderr}"
+                if output_container:
+                    output_container.error(error_msg)
+                return error_msg
+            
+        except subprocess.TimeoutExpired:
+            error_msg = "模型執行超時（超過10分鐘）"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        except Exception as e:
+            error_msg = f"模型執行出錯: {str(e)}"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
 
 def check_model_dependencies():
     """
