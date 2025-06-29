@@ -1,8 +1,14 @@
 import streamlit as st
 from model_adapters import run_heuristic_exposure, run_rl_exposure, check_model_dependencies
 
-st.title("電影推薦系統")
-st.write("你好！我是你的電影推薦小幫手。")
+st.set_page_config(
+    page_title="電影推薦系統比較",
+    page_icon="🎬",
+    layout="wide"
+)
+
+st.title("🎬 電影推薦系統比較")
+st.write("歡迎使用智能電影推薦系統！我將為您提供個性化的電影推薦。")
 
 # 檢查依賴
 dependencies_ok, dependency_msg = check_model_dependencies()
@@ -10,75 +16,117 @@ if not dependencies_ok:
     st.error(f"系統檢查失敗: {dependency_msg}")
     st.stop()
 else:
-    st.success("系統檢查通過！")
+    st.success("✅ 系統檢查通過！")
 
 # Sidebar for model selection
-st.sidebar.title("模型選擇")
+st.sidebar.title("🎯 模型選擇")
+st.sidebar.write("選擇您想使用的推薦算法：")
 model_choice = st.sidebar.selectbox(
-    "請選擇您想使用的推薦模型：",
-    ("Heuristic Exposure", "RL Exposure")
+    "推薦模型：",
+    ("Heuristic Exposure", "RL Exposure"),
+    help="Heuristic使用啟發式策略，RL使用強化學習"
 )
+
+# 模型說明
+if model_choice == "Heuristic Exposure":
+    st.sidebar.info("""
+    **Heuristic Exposure 模型**
+    - 使用啟發式策略
+    - 通過社群偵測增加推薦多樣性
+    - 適合探索新類型電影
+    """)
+else:
+    st.sidebar.info("""
+    **RL Exposure 模型**
+    - 使用強化學習算法
+    """)
 
 # 用戶輸入區域
-st.subheader("🎯 個人化電影推薦")
-user_id = st.number_input(
-    "請輸入用戶ID（數字）：", 
-    min_value=1, 
-    max_value=10000, 
-    value=1, 
-    step=1,
-    help="輸入您想要推薦電影的用戶ID"
-)
+st.subheader("🎯 個人化電影推薦設置")
 
-num_recommendations = st.slider(
-    "推薦電影數量：", 
-    min_value=1, 
-    max_value=20, 
-    value=5,
-    help="選擇要推薦的電影數量"
-)
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    user_id = st.number_input(
+        "請輸入用戶ID：", 
+        min_value=1, 
+        max_value=6040, 
+        value=1, 
+        step=1,
+        help="輸入您想要推薦電影的用戶ID（範圍：1-6040）"
+    )
+
+with col2:
+    num_recommendations = st.slider(
+        "推薦電影數量：", 
+        min_value=1, 
+        max_value=20, 
+        value=10,
+        help="選擇要推薦的電影數量"
+    )
+
+# 添加說明信息
+st.info(f"🎯 即將為用戶 {user_id} 推薦 {num_recommendations} 部電影，使用 {model_choice} 算法")
 
 # Main content
 if model_choice == "Heuristic Exposure":
-    st.header("Heuristic Exposure 模型")
-    st.write("此模型使用啟發式策略，透過社群偵測來增加曝光項目的多樣性。")
+    st.header("🎯 Heuristic Exposure 推薦模型")
     
     # 添加執行按鈕
-    if st.button(f"為用戶 {user_id} 推薦電影", key="heuristic_btn"):
-        # 創建一個容器來顯示進度和結果
-        output_container = st.empty()
-        with st.spinner("正在執行模型，請稍候..."):
-            result = run_heuristic_exposure(output_container, user_id, num_recommendations)
+    if st.button(f"🚀 開始為用戶 {user_id} 推薦電影", key="heuristic_btn", type="primary"):
+        output_container = st.container()
+        with st.spinner("🎬 正在分析您的偏好並生成推薦，請稍候..."):
+            # 使用 user_id - 1 因為內部索引從0開始
+            result = run_heuristic_exposure(output_container, user_id - 1, num_recommendations)
         
-        # 顯示最終結果
-        st.subheader(f"用戶 {user_id} 的推薦結果")
-        if "模型執行失敗" in result or "模型執行超時" in result or "模型執行出錯" in result:
-            st.error("模型執行遇到問題，請檢查錯誤信息。")
+        if "成功" in result:
+            st.balloons()
+            st.success("🎉 推薦完成！希望您會喜歡這些電影！")
         else:
-            st.success("推薦完成！")
-            
-else:
-    st.header("RL Exposure 模型")
-    st.write("此模型使用強化學習來動態調整使用者與項目的連結，以優化社群結構。")
-    
-    # 添加執行按鈕
-    if st.button(f"為用戶 {user_id} 推薦電影", key="rl_btn"):
-        # 創建一個容器來顯示進度和結果
-        output_container = st.empty()
-        with st.spinner("正在執行模型，請稍候...（可能需要幾分鐘）"):
-            result = run_rl_exposure(output_container, user_id, num_recommendations)
-        
-        # 顯示最終結果
-        st.subheader(f"用戶 {user_id} 的推薦結果")
-        if "模型執行失敗" in result or "模型執行超時" in result or "模型執行出錯" in result:
-            st.error("模型執行遇到問題，請檢查錯誤信息。")
-        else:
-            st.success("推薦完成！")
+            st.error("⚠️ 推薦過程中遇到問題，請檢查用戶ID是否正確。")
 
-# 添加一些說明信息
+else:
+    st.header("🤖 RL Exposure 推薦模型")
+    
+    # 添加執行按鈕
+    if st.button(f"🚀 開始為用戶 {user_id} 推薦電影", key="rl_btn", type="primary"):
+        output_container = st.container()
+        with st.spinner("🤖 AI正在學習您的偏好並生成推薦，請稍候..."):
+            # 使用 user_id - 1 因為內部索引從0開始
+            result = run_rl_exposure(output_container, user_id - 1, num_recommendations)
+        
+        if "成功" in result:
+            st.balloons()
+            st.success("🎉 推薦完成！希望您會喜歡這些電影！")
+        else:
+            st.error("⚠️ 推薦過程中遇到問題，請檢查用戶ID是否正確。")
+
+# 添加更詳細的說明信息
 st.sidebar.markdown("---")
-st.sidebar.subheader("使用說明")
-st.sidebar.write("1. 選擇想要使用的推薦模型")
-st.sidebar.write("2. 點擊相應的運行按鈕")
-st.sidebar.write("3. 等待模型執行完成")
-st.sidebar.write("4. 查看執行結果") 
+st.sidebar.subheader("📖 使用說明")
+st.sidebar.write("""
+1. **選擇模型**：根據您的需求選擇推薦算法
+2. **輸入用戶ID**：選擇要分析的用戶（1-6040）
+3. **設置推薦數量**：選擇想要的推薦電影數量
+4. **點擊推薦按鈕**：開始生成個性化推薦
+5. **查看結果**：瀏覽用戶信息和推薦電影
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 數據說明")
+st.sidebar.write("""
+- **用戶數據**：6,040個用戶
+- **電影數據**：3,883部電影
+- **評分數據**：1,000,209個評分
+- **評分範圍**：1-5星
+- **數據來源**：MovieLens 1M數據集
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎬 電影類型")
+st.sidebar.write("""
+包含18種電影類型：
+動作、冒險、動畫、兒童、喜劇、犯罪、
+紀錄片、劇情、奇幻、黑色電影、恐怖、
+音樂劇、神秘、愛情、科幻、驚悚、戰爭、西部
+""") 
