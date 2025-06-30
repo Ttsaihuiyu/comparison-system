@@ -1,14 +1,14 @@
 import streamlit as st
-from model_adapters import run_heuristic_exposure, run_rl_exposure, check_model_dependencies
+from model_adapters import run_heuristic_exposure, check_model_dependencies
 
 st.set_page_config(
-    page_title="電影推薦系統比較",
+    page_title="電影推薦系統",
     page_icon="🎬",
     layout="wide"
 )
 
-st.title("🎬 電影推薦系統比較")
-st.write("歡迎使用智能電影推薦系統！我將為您提供個性化的電影推薦。")
+st.title("🎬 電影推薦系統")
+ 
 
 # 檢查依賴
 dependencies_ok, dependency_msg = check_model_dependencies()
@@ -17,29 +17,6 @@ if not dependencies_ok:
     st.stop()
 else:
     st.success("✅ 系統檢查通過！")
-
-# Sidebar for model selection
-st.sidebar.title("🎯 模型選擇")
-st.sidebar.write("選擇您想使用的推薦算法：")
-model_choice = st.sidebar.selectbox(
-    "推薦模型：",
-    ("Heuristic Exposure", "RL Exposure"),
-    help="Heuristic使用啟發式策略，RL使用強化學習"
-)
-
-# 模型說明
-if model_choice == "Heuristic Exposure":
-    st.sidebar.info("""
-    **Heuristic Exposure 模型**
-    - 使用啟發式策略
-    - 通過社群偵測增加推薦多樣性
-    - 適合探索新類型電影
-    """)
-else:
-    st.sidebar.info("""
-    **RL Exposure 模型**
-    - 使用強化學習算法
-    """)
 
 # 用戶輸入區域
 st.subheader("🎯 個人化電影推薦設置")
@@ -66,50 +43,41 @@ with col2:
     )
 
 # 添加說明信息
-st.info(f"🎯 即將為用戶 {user_id} 推薦 {num_recommendations} 部電影，使用 {model_choice} 算法")
+st.info(f"🎯 即將為用戶 {user_id} 推薦 {num_recommendations} 部電影")
 
 # Main content
-if model_choice == "Heuristic Exposure":
-    st.header("🎯 Heuristic Exposure 推薦模型")
-    
-    # 添加執行按鈕
-    if st.button(f"🚀 開始為用戶 {user_id} 推薦電影", key="heuristic_btn", type="primary"):
-        output_container = st.container()
-        with st.spinner("🎬 正在分析您的偏好並生成推薦，請稍候..."):
-            # 使用 user_id - 1 因為內部索引從0開始
-            result = run_heuristic_exposure(output_container, user_id - 1, num_recommendations)
-        
-        if "成功" in result:
-            st.balloons()
-            st.success("🎉 推薦完成！希望您會喜歡這些電影！")
-        else:
-            st.error("⚠️ 推薦過程中遇到問題，請檢查用戶ID是否正確。")
+st.header("🎯 Heuristic Exposure 推薦模型")
 
-else:
-    st.header("🤖 RL Exposure 推薦模型")
+# 添加執行按鈕
+if st.button(f"🚀 開始為用戶 {user_id} 推薦電影", key="heuristic_btn", type="primary"):
+    output_container = st.container()
+    with st.spinner("🎬 正在分析您的偏好並生成推薦，請稍候..."):
+        # 使用 user_id - 1 因為內部索引從0開始
+        result = run_heuristic_exposure(output_container, user_id - 1, num_recommendations)
     
-    # 添加執行按鈕
-    if st.button(f"🚀 開始為用戶 {user_id} 推薦電影", key="rl_btn", type="primary"):
-        output_container = st.container()
-        with st.spinner("🤖 AI正在學習您的偏好並生成推薦，請稍候..."):
-            # 使用 user_id - 1 因為內部索引從0開始
-            result = run_rl_exposure(output_container, user_id - 1, num_recommendations)
-        
-        if "成功" in result:
-            st.balloons()
-            st.success("🎉 推薦完成！希望您會喜歡這些電影！")
-        else:
-            st.error("⚠️ 推薦過程中遇到問題，請檢查用戶ID是否正確。")
+    if "成功" in result:
+         
+        st.success("🎉 推薦完成！希望您會喜歡這些電影！")
+    else:
+        st.error("⚠️ 推薦過程中遇到問題，請檢查用戶ID是否正確。")
 
 # 添加更詳細的說明信息
 st.sidebar.markdown("---")
 st.sidebar.subheader("📖 使用說明")
 st.sidebar.write("""
-1. **選擇模型**：根據您的需求選擇推薦算法
-2. **輸入用戶ID**：選擇要分析的用戶（1-6040）
-3. **設置推薦數量**：選擇想要的推薦電影數量
-4. **點擊推薦按鈕**：開始生成個性化推薦
-5. **查看結果**：瀏覽用戶信息和推薦電影
+1. **輸入用戶ID**：選擇要分析的用戶（1-6040）
+2. **設置推薦數量**：選擇想要的推薦電影數量
+3. **點擊推薦按鈕**：開始生成個性化推薦
+4. **查看結果**：瀏覽用戶信息和推薦電影
+""")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 推薦算法說明")
+st.sidebar.info("""
+**Heuristic Exposure 模型**
+- 使用啟發式策略
+- 通過社群偵測增加推薦多樣性
+- 適合探索新類型電影
 """)
 
 st.sidebar.markdown("---")
