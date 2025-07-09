@@ -92,19 +92,82 @@ def load_user_info():
                 }
     return users_dict
 
-def get_user_recommendations(user_embeddings, item_embeddings, user_id, num_recommendations=20):
+def get_user_recommendations(user_embeddings, item_embeddings, user_id, num_recommendations=20, exclude_ids=None):
     """
-    為特定用戶生成電影推薦
+    為特定用戶生成電影推薦，可選擇排除已觀看電影
     """
     with torch.no_grad():
         # 計算用戶和所有電影的相似度
         user_emb = user_embeddings[user_id].unsqueeze(0)  # shape: (1, emb_dim)
         scores = torch.mm(user_emb, item_embeddings.t()).squeeze()  # shape: (num_items,)
         
-        # 獲取 top-k 推薦
-        _, top_items = torch.topk(scores, num_recommendations)
+        # 如果有要排除的電影，將其分數設為負無窮大
+        if exclude_ids and isinstance(exclude_ids, list) and len(exclude_ids) > 0:
+            scores[exclude_ids] = -float('inf')
         
-        return top_items.cpu().numpy(), scores[top_items].cpu().numpy()
+        # 獲取 top-k 推薦
+        top_scores, top_items = torch.topk(scores, num_recommendations)
+        
+        return top_items.cpu().numpy(), top_scores.cpu().numpy()
+
+def find_similar_users(user_embeddings, target_user_id, num_similar_users=2):
+    """
+    找到與目標用戶最相似的用戶
+    """
+    with torch.no_grad():
+        target_emb = user_embeddings[target_user_id].unsqueeze(0)  # shape: (1, emb_dim)
+        
+        # 計算與所有用戶的相似度（使用餘弦相似度）
+        similarities = torch.cosine_similarity(target_emb, user_embeddings, dim=1)
+        
+        # 將目標用戶自己的相似度設為負無窮大，避免推薦自己
+        similarities[target_user_id] = -float('inf')
+        
+        # 獲取最相似的用戶
+        _, top_users = torch.topk(similarities, num_similar_users)
+        similarity_scores = similarities[top_users]
+        
+        return top_users.cpu().numpy(), similarity_scores.cpu().numpy()
+
+def get_user_watched_movies(user_id, reverse_uid_map, reverse_mid_map, num_movies=5):
+    """
+    獲取指定用戶看過的電影（按評分排序，取高分電影）
+    """
+    try:
+        # 讀取數據
+        train_df = pd.read_csv(RL_RECOMMENDER_PATH / 'data/train.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
+        val_df = pd.read_csv(RL_RECOMMENDER_PATH / 'data/val.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
+        test_df = pd.read_csv(RL_RECOMMENDER_PATH / 'data/test.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
+        
+        combined = pd.concat([train_df, val_df, test_df])
+        
+        # 找到該用戶的所有交互記錄
+        user_interactions = combined[combined['user_id'] == user_id].copy()
+        
+        if user_interactions.empty:
+            return []
+        
+        # 按評分降序排序，選擇高分電影
+        user_interactions = user_interactions.sort_values(['rating', 'timestamp'], ascending=[False, False])
+        
+        # 取前 num_movies 部電影
+        top_movies = user_interactions.head(num_movies)
+        
+        # 轉換為原始電影ID
+        watched_movies = []
+        for _, row in top_movies.iterrows():
+            original_movie_id = reverse_mid_map.get(row['movie_id'])
+            if original_movie_id is not None:
+                watched_movies.append({
+                    'movie_id': original_movie_id,
+                    'rating': row['rating']
+                })
+        
+        return watched_movies
+        
+    except Exception as e:
+        print(f"獲取用戶觀看電影失敗: {str(e)}")
+        return []
 
 def run_heuristic_exposure(output_container=None, target_user_id=None, num_recommendations=20):
     """
@@ -120,8 +183,8 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
         users_info = load_user_info()
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        user_embeddings = torch.load("model/simulator/user_emb.pt", map_location=device, weights_only=True)
-        item_embeddings = torch.load("model/simulator/item_emb.pt", map_location=device, weights_only=True)
+        user_embeddings = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb.pt", map_location=device, weights_only=True)
         
         # 载入映射文件
         uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
@@ -133,6 +196,9 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
             os.chdir(original_dir)
             return error_msg
         
+        # 獲取用戶歷史交互記錄，以便過濾推薦
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
         # 檢查用戶ID是否有效
         if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
             error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
@@ -141,9 +207,10 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
             os.chdir(original_dir)
             return error_msg
         
-        # 為特定用戶生成推薦
+        # 為特定用戶生成推薦，並排除已觀看電影
         recommended_items, scores = get_user_recommendations(
-            user_embeddings, item_embeddings, target_user_id, num_recommendations
+            user_embeddings, item_embeddings, target_user_id, num_recommendations,
+            exclude_ids=watched_movie_ids
         )
         
         # 切換回原目錄
@@ -152,35 +219,39 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
         if output_container:
             output_container.success("Heuristic 推薦完成！")
             
-            # 獲取用戶歷史交互記錄
-            user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
-            
             # 顯示用戶信息
             user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
             if user_info:
                 output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
-                col1, col2, col3, col4 = output_container.columns(4)
-                with col1:
-                    output_container.metric("性別", user_info['gender'])
-                with col2:
-                    output_container.metric("年齡", user_info['age'])
-                with col3:
-                    output_container.metric("職業", user_info['occupation'])
-                with col4:
-                    output_container.metric("歷史交互", f"{len(watched_movie_ids)} 部電影")
+                # 使用表格形式確保完整顯示
+                import pandas as pd
+                user_data = pd.DataFrame({
+                    '性別': [user_info['gender']],
+                    '年齡': [user_info['age']],
+                    '職業': [user_info['occupation']],
+                    '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
+                })
+                output_container.dataframe(user_data, use_container_width=True, hide_index=True)
 
             output_container.subheader(f"🎯 為用戶 {target_user_id} 的 Heuristic 推薦結果")
             
             # 創建詳細的推薦結果表格
             recommendations_data = []
             for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
-                movie_info = movies_info.get(item_id + 1, {})  # 電影ID從1開始
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
+                movie_title = movie_info.get('title', '未知電影')
+                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
                 
                 recommendations_data.append({
                     '排名': i + 1,
-                    '電影ID': item_id,
-                    '電影名稱': movie_info.get('title', '未知電影'),
-                    '類型': ' | '.join(movie_info.get('genres', ['未知'])),
+                    '電影ID': original_movie_id,
+                    '電影名稱': movie_title,
+                    '類型': movie_genres,
                     '推薦分數': f"{score:.4f}"
                 })
             
@@ -205,7 +276,12 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
             
             # 顯示推薦結果表格，並為每行添加愛心按鈕
             for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
-                movie_info = movies_info.get(item_id + 1, {})
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
                 movie_title = movie_info.get('title', '未知電影')
                 movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
                 
@@ -214,7 +290,7 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
                 with col1:
                     output_container.write(f"**{i+1}**")
                 with col2:
-                    output_container.write(f"{item_id}")
+                    output_container.write(f"{original_movie_id}")  # 顯示原始電影ID
                 with col3:
                     output_container.write(f"**{movie_title}**")
                 with col4:
@@ -223,8 +299,8 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
                     output_container.write(f"{score:.4f}")
                 with col6:
                     if output_container.button("❤️", key=f"heart_{target_user_id}_{i}", help="加入我的最愛"):
-                        # 添加到用戶交互記錄
-                        success = add_movie_to_interactions(target_user_id, item_id + 1, movie_info, reverse_uid_map, reverse_mid_map)
+                        # 添加到用戶交互記錄，直接使用原始電影ID
+                        success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
                         
                         if success:
                             output_container.success(f"❤️ 已將《{movie_title}》添加到交互記錄！")
@@ -243,41 +319,14 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
                 output_container.subheader(f"📚 用戶 {target_user_id} 的歷史交互記錄")
                 output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
                 
-                # 獲取推薦電影的ID列表（需要加1因為電影ID從1開始）
-                recommended_movie_ids = [item_id + 1 for item_id in recommended_items]
+                # 按時間戳降序排列
+                sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
                 
-                # 根據是否與推薦重複來重新排序交互記錄
-                # 先找出與推薦重複的記錄
-                overlapping_records = user_interactions_df[user_interactions_df['Movie_ID'].isin(recommended_movie_ids)]
-                non_overlapping_records = user_interactions_df[~user_interactions_df['Movie_ID'].isin(recommended_movie_ids)]
-                
-                # 重新組合：重複的記錄排在前面，按推薦順序排列
-                if not overlapping_records.empty:
-                    # 為重複記錄添加推薦順序，以便按推薦順序排列
-                    overlapping_records = overlapping_records.copy()
-                    overlapping_records['recommendation_order'] = overlapping_records['Movie_ID'].map(
-                        {movie_id: i for i, movie_id in enumerate(recommended_movie_ids)}
-                    )
-                    overlapping_records = overlapping_records.sort_values('recommendation_order').drop('recommendation_order', axis=1)
-                    
-                    # 非重複記錄按時間戳降序排列
-                    non_overlapping_records = non_overlapping_records.sort_values('Timestamp', ascending=False)
-                    
-                    # 組合：重複記錄在前，非重複記錄在後
-                    sorted_interactions = pd.concat([overlapping_records, non_overlapping_records], ignore_index=True)
-                else:
-                    # 如果沒有重複，按時間戳降序排列
-                    sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
-                
-                # 顯示所有交互記錄（不再限制數量）
+                # 顯示所有交互記錄
                 output_container.dataframe(sorted_interactions, use_container_width=True)
                 
                 # 顯示統計信息
-                overlap_count = len(overlapping_records) if not overlapping_records.empty else 0
-                if overlap_count > 0:
-                    output_container.info(f"🎯 共 {len(sorted_interactions)} 條交互記錄，其中 {overlap_count} 條與推薦重複（已置頂顯示）")
-                else:
-                    output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
+                output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
             else:
                 output_container.warning("該用戶沒有歷史交互記錄")
         
@@ -300,8 +349,8 @@ def check_model_dependencies():
             return False, f"RL_recommender 目錄不存在: {RL_RECOMMENDER_PATH}"
         
         # 檢查模型文件
-        user_emb_file = RL_RECOMMENDER_PATH / "model" / "simulator" / "user_emb.pt"
-        item_emb_file = RL_RECOMMENDER_PATH / "model" / "simulator" / "item_emb.pt"
+        user_emb_file = RL_RECOMMENDER_PATH / "model" / "RS" / "user_emb.pt"
+        item_emb_file = RL_RECOMMENDER_PATH / "model" / "RS" / "item_emb.pt"
         
         if not user_emb_file.exists():
             return False, f"用戶嵌入文件不存在: {user_emb_file}"
@@ -456,7 +505,7 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
     將電影添加到用戶的交互記錄中
     """
     try:
-        print(f"🔍 開始處理: 用戶{user_id}, 電影ID{original_movie_id}")
+        print(f"🔍 開始處理: 用戶{user_id}, 原始電影ID{original_movie_id}")
         
         # 切換到 RL_recommender 目錄
         original_dir = os.getcwd()
@@ -466,19 +515,19 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
         # 讀取現有的交互記錄
         train_file = "data/train.dat"
         
-        # 檢查電影ID映射
+        # 檢查電影ID映射 - 從原始ID映射到模型使用的ID
         mid_map_file = RL_RECOMMENDER_PATH / "mapping" / "mid_map.pkl"
         with open(mid_map_file, 'rb') as f:
             mid_map = pickle.load(f)
         
-        # 將原始電影ID轉換為映射後的ID
+        # 將原始電影ID轉換為映射後的ID（用於存儲到train.dat）
         mapped_movie_id = mid_map.get(original_movie_id)
         if mapped_movie_id is None:
-            print(f"❌ 電影ID {original_movie_id} 不在映射中")
+            print(f"❌ 原始電影ID {original_movie_id} 不在映射中")
             os.chdir(original_dir)
             return False
         
-        print(f"✅ 電影ID映射成功: {original_movie_id} -> {mapped_movie_id}")
+        print(f"✅ 電影ID映射成功: 原始ID{original_movie_id} -> 映射ID{mapped_movie_id}")
         
         # 生成新的交互記錄
         current_timestamp = int(datetime.now().timestamp())
@@ -493,7 +542,7 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
         # 同時保存到單獨的用戶交互文件
         interaction_file = f"interaction_collect/user_{user_id}_interactions.csv"
         
-        # 創建新記錄的數據框
+        # 創建新記錄的數據框（使用原始電影ID）
         new_record = pd.DataFrame({
             'Movie_ID': [original_movie_id],
             'Title': [movie_info.get('title', '未知電影')],
@@ -529,9 +578,6 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
         return False
 
 def get_recommendations_data(target_user_id, num_recommendations=20):
-    """
-    獲取推薦數據，不直接顯示界面 - 用於狀態管理
-    """
     try:
         # 切換到 RL_recommender 目錄
         original_dir = os.getcwd()
@@ -542,8 +588,8 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
         users_info = load_user_info()
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        user_embeddings = torch.load("model/simulator/user_emb.pt", map_location=device, weights_only=True)
-        item_embeddings = torch.load("model/simulator/item_emb.pt", map_location=device, weights_only=True)
+        user_embeddings = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb.pt", map_location=device, weights_only=True)
         
         # 載入映射文件
         uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
@@ -552,19 +598,20 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
             os.chdir(original_dir)
             return None, "無法載入映射文件"
         
+        # 先獲取用戶歷史交互記錄，以便在推薦中過濾
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
         # 檢查用戶ID是否有效
         if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
             error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
             os.chdir(original_dir)
             return None, error_msg
         
-        # 為特定用戶生成推薦
+        # 為特定用戶生成推薦，並排除已觀看電影
         recommended_items, scores = get_user_recommendations(
-            user_embeddings, item_embeddings, target_user_id, num_recommendations
+            user_embeddings, item_embeddings, target_user_id, num_recommendations,
+            exclude_ids=watched_movie_ids
         )
-        
-        # 獲取用戶歷史交互記錄
-        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
         
         # 準備返回數據
         recommendations_data = {
@@ -576,7 +623,8 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
             'user_interactions_df': user_interactions_df,
             'watched_movie_ids': watched_movie_ids,
             'reverse_uid_map': reverse_uid_map,
-            'reverse_mid_map': reverse_mid_map
+            'reverse_mid_map': reverse_mid_map,
+            'user_embeddings': user_embeddings  # 添加用戶嵌入，用於社群推薦
         }
         
         # 切換回原目錄
@@ -606,6 +654,7 @@ def display_recommendations(output_container, recommendations_data):
     watched_movie_ids = recommendations_data['watched_movie_ids']
     reverse_uid_map = recommendations_data['reverse_uid_map']
     reverse_mid_map = recommendations_data['reverse_mid_map']
+    user_embeddings = recommendations_data['user_embeddings'] # 獲取用戶嵌入
     
     output_container.success("Heuristic 推薦完成！")
     
@@ -613,20 +662,20 @@ def display_recommendations(output_container, recommendations_data):
     user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
     if user_info:
         output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
-        col1, col2, col3, col4 = output_container.columns(4)
-        with col1:
-            output_container.metric("性別", user_info['gender'])
-        with col2:
-            output_container.metric("年齡", user_info['age'])
-        with col3:
-            output_container.metric("職業", user_info['occupation'])
-        with col4:
-            output_container.metric("歷史交互", f"{len(watched_movie_ids)} 部電影")
+        # 使用表格形式確保完整顯示
+        import pandas as pd
+        user_data = pd.DataFrame({
+            '性別': [user_info['gender']],
+            '年齡': [user_info['age']],
+            '職業': [user_info['occupation']],
+            '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
+        })
+        output_container.dataframe(user_data, use_container_width=True, hide_index=True)
 
     output_container.subheader(f"🎯 為用戶 {target_user_id} 的 Heuristic 推薦結果")
     
     # 添加表格標題
-    col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 1])
+    col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
     with col1:
         output_container.write("**排名**")
     with col2:
@@ -644,16 +693,21 @@ def display_recommendations(output_container, recommendations_data):
     
     # 顯示推薦結果表格，並為每行添加愛心按鈕
     for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
-        movie_info = movies_info.get(item_id + 1, {})
+        # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+        original_movie_id = reverse_mid_map.get(item_id)
+        if original_movie_id is None:
+            continue  # 跳過無法映射的電影
+        
+        movie_info = movies_info.get(original_movie_id, {})
         movie_title = movie_info.get('title', '未知電影')
         movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
         
-        col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 1])
+        col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
         
         with col1:
             output_container.write(f"**{i+1}**")
         with col2:
-            output_container.write(f"{item_id}")
+            output_container.write(f"{original_movie_id}")  # 顯示原始電影ID
         with col3:
             output_container.write(f"**{movie_title}**")
         with col4:
@@ -662,8 +716,8 @@ def display_recommendations(output_container, recommendations_data):
             output_container.write(f"{score:.4f}")
         with col6:
             if output_container.button("❤️", key=f"heart_{target_user_id}_{i}", help="加入我的最愛"):
-                # 添加到用戶交互記錄
-                success = add_movie_to_interactions(target_user_id, item_id + 1, movie_info, reverse_uid_map, reverse_mid_map)
+                # 添加到用戶交互記錄，直接使用原始電影ID
+                success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
                 
                 if success:
                     output_container.success(f"❤️ 已將《{movie_title}》添加到交互記錄！")
@@ -682,39 +736,88 @@ def display_recommendations(output_container, recommendations_data):
         output_container.subheader(f"📚 用戶 {target_user_id} 的歷史交互記錄")
         output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
         
-        # 獲取推薦電影的ID列表（需要加1因為電影ID從1開始）
-        recommended_movie_ids = [item_id + 1 for item_id in recommended_items]
+        # 按時間戳降序排列
+        sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
         
-        # 根據是否與推薦重複來重新排序交互記錄
-        # 先找出與推薦重複的記錄
-        overlapping_records = user_interactions_df[user_interactions_df['Movie_ID'].isin(recommended_movie_ids)]
-        non_overlapping_records = user_interactions_df[~user_interactions_df['Movie_ID'].isin(recommended_movie_ids)]
-        
-        # 重新組合：重複的記錄排在前面，按推薦順序排列
-        if not overlapping_records.empty:
-            # 為重複記錄添加推薦順序，以便按推薦順序排列
-            overlapping_records = overlapping_records.copy()
-            overlapping_records['recommendation_order'] = overlapping_records['Movie_ID'].map(
-                {movie_id: i for i, movie_id in enumerate(recommended_movie_ids)}
-            )
-            overlapping_records = overlapping_records.sort_values('recommendation_order').drop('recommendation_order', axis=1)
-            
-            # 非重複記錄按時間戳降序排列
-            non_overlapping_records = non_overlapping_records.sort_values('Timestamp', ascending=False)
-            
-            # 組合：重複記錄在前，非重複記錄在後
-            sorted_interactions = pd.concat([overlapping_records, non_overlapping_records], ignore_index=True)
-        else:
-            # 如果沒有重複，按時間戳降序排列
-            sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
-        
-        # 顯示所有交互記錄（不再限制數量）
+        # 顯示所有交互記錄
         output_container.dataframe(sorted_interactions, use_container_width=True)
         
         # 顯示統計信息
-        overlap_count = len(overlapping_records) if not overlapping_records.empty else 0
-        if overlap_count > 0:
-            output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
+        output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
     else:
         output_container.warning("該用戶沒有歷史交互記錄")
+
+    # 添加社群推薦功能
+    output_container.markdown("---")
+    output_container.subheader("👥 社群推薦 - 看過類似電影的用戶推薦")
+    
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 找到最相似的兩個用戶（使用傳入的用戶嵌入）
+        similar_users, similarity_scores = find_similar_users(user_embeddings, target_user_id, num_similar_users=2)
+        
+        # 為每個相似用戶顯示推薦
+        for i, (similar_user_id, similarity_score) in enumerate(zip(similar_users, similarity_scores)):
+            # 獲取該用戶看過的高分電影
+            watched_movies = get_user_watched_movies(similar_user_id, reverse_uid_map, reverse_mid_map, num_movies=5)
+            
+            if watched_movies:
+                output_container.subheader(f"🎬 用戶 {similar_user_id} 跟你看過類似的電影，所以你也可能喜歡看這些電影")
+                output_container.info(f"相似度: {similarity_score:.4f}")
+                
+                # 創建推薦表格
+                col1, col2, col3, col4, col5 = output_container.columns([1, 1, 4, 3, 2])
+                with col1:
+                    output_container.write("**排名**")
+                with col2:
+                    output_container.write("**電影ID**")
+                with col3:
+                    output_container.write("**電影名稱**")
+                with col4:
+                    output_container.write("**類型**")
+                with col5:
+                    output_container.write("**用戶評分**")
+                
+                output_container.write("---")
+                
+                # 顯示推薦電影
+                for j, movie_data in enumerate(watched_movies):
+                    movie_id = movie_data['movie_id']
+                    rating = movie_data['rating']
+                    
+                    movie_info = movies_info.get(movie_id, {})
+                    movie_title = movie_info.get('title', '未知電影')
+                    movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                    
+                    col1, col2, col3, col4, col5 = output_container.columns([1, 1, 4, 3, 2])
+                    
+                    with col1:
+                        output_container.write(f"**{j+1}**")
+                    with col2:
+                        output_container.write(f"{movie_id}")
+                    with col3:
+                        output_container.write(f"**{movie_title}**")
+                    with col4:
+                        output_container.write(f"{movie_genres}")
+                    with col5:
+                        output_container.write(f"⭐ {rating}")
+                
+                if i < len(similar_users) - 1:  # 如果不是最後一個用戶，添加分隔線
+                    output_container.markdown("---")
+            else:
+                output_container.warning(f"用戶 {similar_user_id} 沒有足夠的觀看記錄")
+        
+        # 切換回原目錄
+        os.chdir(original_dir)
+        
+    except Exception as e:
+        output_container.error(f"社群推薦功能出錯: {str(e)}")
+        # 確保切換回原目錄
+        try:
+            os.chdir(original_dir)
+        except:
+            pass
 

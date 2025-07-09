@@ -1,11 +1,22 @@
 import streamlit as st
+import time
 from model_adapters import run_heuristic_exposure, check_model_dependencies, load_mapping_files, get_user_liked_movies, get_recommendations_data, display_recommendations
 
+# 配置頁面 - 開啟自動重載
 st.set_page_config(
-    page_title="電影推薦系統",
+    page_title="電影推薦系統比較",
     page_icon="🎬",
     layout="wide"
 )
+
+# 添加重載按鈕（開發時使用）
+if st.sidebar.button("🔄 強制重載"):
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.rerun()
+
+# 顯示最後更新時間（確認是否有重載）
+st.sidebar.text(f"最後更新: {time.strftime('%H:%M:%S')}")
 
 st.title("🎬 電影推薦系統")
 
