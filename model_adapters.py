@@ -821,3 +821,422 @@ def display_recommendations(output_container, recommendations_data):
         except:
             pass
 
+def run_simulator_exposure(output_container=None, target_user_id=None, num_recommendations=20):
+    """
+    運行 Simulator Exposure 模型 - 使用 simulator 目錄中的原始 user embedding 和 item embedding
+    """
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 載入用戶和電影信息
+        movies_info = load_movie_info()
+        users_info = load_user_info()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # 使用 simulator 目錄中的原始 embeddings
+        user_embeddings = torch.load("model/simulator/user_emb.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/simulator/item_emb.pt", map_location=device, weights_only=True)
+        
+        # 载入映射文件
+        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
+        
+        if not mapping_success:
+            error_msg = "無法載入映射文件"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        
+        # 獲取用戶歷史交互記錄，以便過濾推薦
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
+        # 檢查用戶ID是否有效
+        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        
+        # 為特定用戶生成推薦，並排除已觀看電影
+        recommended_items, scores = get_user_recommendations(
+            user_embeddings, item_embeddings, target_user_id, num_recommendations,
+            exclude_ids=watched_movie_ids
+        )
+        
+        # 切換回原目錄
+        os.chdir(original_dir)
+        
+        if output_container:
+            output_container.success("Simulator 推薦完成！")
+            
+            # 顯示用戶信息
+            user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
+            if user_info:
+                output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
+                # 使用表格形式確保完整顯示
+                import pandas as pd
+                user_data = pd.DataFrame({
+                    '性別': [user_info['gender']],
+                    '年齡': [user_info['age']],
+                    '職業': [user_info['occupation']],
+                    '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
+                })
+                output_container.dataframe(user_data, use_container_width=True, hide_index=True)
+
+            output_container.subheader(f"🎯 為用戶 {target_user_id} 的 Simulator 推薦結果")
+            
+            # 創建詳細的推薦結果表格
+            recommendations_data = []
+            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
+                movie_title = movie_info.get('title', '未知電影')
+                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                
+                recommendations_data.append({
+                    '排名': i + 1,
+                    '電影ID': original_movie_id,
+                    '電影名稱': movie_title,
+                    '類型': movie_genres,
+                    '推薦分數': f"{score:.4f}"
+                })
+            
+            recommendations_df = pd.DataFrame(recommendations_data)
+            
+            # 添加表格標題
+            col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
+            with col1:
+                output_container.write("**排名**")
+            with col2:
+                output_container.write("**電影ID**")
+            with col3:
+                output_container.write("**電影名稱**")
+            with col4:
+                output_container.write("**類型**")
+            with col5:
+                output_container.write("**推薦分數**")
+            with col6:
+                output_container.write("**喜愛**")
+            
+            output_container.write("---")
+            
+            # 顯示推薦結果表格，並為每行添加愛心按鈕
+            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
+                movie_title = movie_info.get('title', '未知電影')
+                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                
+                col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 1])
+                
+                with col1:
+                    output_container.write(f"**{i+1}**")
+                with col2:
+                    output_container.write(f"{original_movie_id}")  # 顯示原始電影ID
+                with col3:
+                    output_container.write(f"**{movie_title}**")
+                with col4:
+                    output_container.write(f"{movie_genres}")
+                with col5:
+                    output_container.write(f"{score:.4f}")
+                with col6:
+                    if output_container.button("❤️", key=f"sim_heart_{target_user_id}_{i}", help="加入我的最愛"):
+                        # 添加到用戶交互記錄，直接使用原始電影ID
+                        success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
+                        
+                        if success:
+                            output_container.success(f"❤️ 已將《{movie_title}》添加到交互記錄！")
+                            # 更新 session_state 中的交互記錄
+                            import streamlit as st
+                            if 'simulator_recommendations_data' in st.session_state:
+                                # 重新獲取更新後的交互記錄
+                                updated_interactions_df, updated_watched_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+                                st.session_state.simulator_recommendations_data['user_interactions_df'] = updated_interactions_df
+                                st.session_state.simulator_recommendations_data['watched_movie_ids'] = updated_watched_ids
+                        else:
+                            output_container.error("❌ 添加失敗，請稍後再試")
+            
+            # 顯示用戶歷史交互記錄
+            if not user_interactions_df.empty:
+                output_container.subheader(f"📚 用戶 {target_user_id} 的歷史交互記錄")
+                output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
+                
+                # 按時間戳降序排列
+                sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
+                
+                # 顯示所有交互記錄
+                output_container.dataframe(sorted_interactions, use_container_width=True)
+                
+                # 顯示統計信息
+                output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
+            else:
+                output_container.warning("該用戶沒有歷史交互記錄")
+        
+        return f"成功為用戶 {target_user_id} 生成了 {len(recommended_items)} 部推薦電影"
+        
+    except Exception as e:
+        error_msg = f"Simulator 推薦執行出錯: {str(e)}"
+        if output_container:
+            output_container.error(error_msg)
+        os.chdir(original_dir)
+        return error_msg
+
+def get_simulator_recommendations_data(target_user_id, num_recommendations=20):
+    """
+    獲取 Simulator 推薦數據
+    """
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 載入用戶和電影信息
+        movies_info = load_movie_info()
+        users_info = load_user_info()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # 使用 simulator 目錄中的原始 embeddings
+        user_embeddings = torch.load("model/simulator/user_emb.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/simulator/item_emb.pt", map_location=device, weights_only=True)
+        
+        # 載入映射文件
+        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
+        
+        if not mapping_success:
+            os.chdir(original_dir)
+            return None, "無法載入映射文件"
+        
+        # 先獲取用戶歷史交互記錄，以便在推薦中過濾
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
+        # 檢查用戶ID是否有效
+        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+            os.chdir(original_dir)
+            return None, error_msg
+        
+        # 為特定用戶生成推薦，並排除已觀看電影
+        recommended_items, scores = get_user_recommendations(
+            user_embeddings, item_embeddings, target_user_id, num_recommendations,
+            exclude_ids=watched_movie_ids
+        )
+        
+        # 準備返回數據
+        recommendations_data = {
+            'user_id': target_user_id,
+            'recommended_items': recommended_items,
+            'scores': scores,
+            'movies_info': movies_info,
+            'users_info': users_info,
+            'user_interactions_df': user_interactions_df,
+            'watched_movie_ids': watched_movie_ids,
+            'reverse_uid_map': reverse_uid_map,
+            'reverse_mid_map': reverse_mid_map,
+            'user_embeddings': user_embeddings  # 添加用戶嵌入，用於社群推薦
+        }
+        
+        # 切換回原目錄
+        os.chdir(original_dir)
+        
+        return recommendations_data, "成功生成推薦"
+        
+    except Exception as e:
+        error_msg = f"推薦生成出錯: {str(e)}"
+        os.chdir(original_dir)
+        return None, error_msg
+
+def display_simulator_recommendations(output_container, recommendations_data):
+    """
+    顯示 Simulator 推薦結果 - 從保存的數據中渲染界面
+    """
+    if not recommendations_data:
+        output_container.error("沒有推薦數據可顯示")
+        return
+    
+    target_user_id = recommendations_data['user_id']
+    recommended_items = recommendations_data['recommended_items']
+    scores = recommendations_data['scores']
+    movies_info = recommendations_data['movies_info']
+    users_info = recommendations_data['users_info']
+    user_interactions_df = recommendations_data['user_interactions_df']
+    watched_movie_ids = recommendations_data['watched_movie_ids']
+    reverse_uid_map = recommendations_data['reverse_uid_map']
+    reverse_mid_map = recommendations_data['reverse_mid_map']
+    user_embeddings = recommendations_data['user_embeddings'] # 獲取用戶嵌入
+    
+    output_container.success("Simulator 推薦完成！")
+    
+    # 顯示用戶信息
+    user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
+    if user_info:
+        output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
+        # 使用表格形式確保完整顯示
+        import pandas as pd
+        user_data = pd.DataFrame({
+            '性別': [user_info['gender']],
+            '年齡': [user_info['age']],
+            '職業': [user_info['occupation']],
+            '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
+        })
+        output_container.dataframe(user_data, use_container_width=True, hide_index=True)
+
+    output_container.subheader(f"🎯 為用戶 {target_user_id} 的 Simulator 推薦結果")
+    
+    # 添加表格標題
+    col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
+    with col1:
+        output_container.write("**排名**")
+    with col2:
+        output_container.write("**電影ID**")
+    with col3:
+        output_container.write("**電影名稱**")
+    with col4:
+        output_container.write("**類型**")
+    with col5:
+        output_container.write("**推薦分數**")
+    with col6:
+        output_container.write("**喜愛**")
+    
+    output_container.write("---")
+    
+    # 顯示推薦結果表格，並為每行添加愛心按鈕
+    for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
+        # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+        original_movie_id = reverse_mid_map.get(item_id)
+        if original_movie_id is None:
+            continue  # 跳過無法映射的電影
+        
+        movie_info = movies_info.get(original_movie_id, {})
+        movie_title = movie_info.get('title', '未知電影')
+        movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+        
+        col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
+        
+        with col1:
+            output_container.write(f"**{i+1}**")
+        with col2:
+            output_container.write(f"{original_movie_id}")  # 顯示原始電影ID
+        with col3:
+            output_container.write(f"**{movie_title}**")
+        with col4:
+            output_container.write(f"{movie_genres}")
+        with col5:
+            output_container.write(f"{score:.4f}")
+        with col6:
+            if output_container.button("❤️", key=f"sim_heart_{target_user_id}_{i}", help="加入我的最愛"):
+                # 添加到用戶交互記錄，直接使用原始電影ID
+                success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
+                
+                if success:
+                    output_container.success(f"❤️ 已將《{movie_title}》添加到交互記錄！")
+                    # 更新 session_state 中的交互記錄
+                    import streamlit as st
+                    if 'simulator_recommendations_data' in st.session_state:
+                        # 重新獲取更新後的交互記錄
+                        updated_interactions_df, updated_watched_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+                        st.session_state.simulator_recommendations_data['user_interactions_df'] = updated_interactions_df
+                        st.session_state.simulator_recommendations_data['watched_movie_ids'] = updated_watched_ids
+                else:
+                    output_container.error("❌ 添加失敗，請稍後再試")
+    
+    # 顯示用戶歷史交互記錄
+    if not user_interactions_df.empty:
+        output_container.subheader(f"📚 用戶 {target_user_id} 的歷史交互記錄")
+        output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
+        
+        # 按時間戳降序排列
+        sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
+        
+        # 顯示所有交互記錄
+        output_container.dataframe(sorted_interactions, use_container_width=True)
+        
+        # 顯示統計信息
+        output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
+    else:
+        output_container.warning("該用戶沒有歷史交互記錄")
+
+    # 添加社群推薦功能
+    output_container.markdown("---")
+    output_container.subheader("👥 社群推薦 - 看過類似電影的用戶推薦")
+    
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 找到最相似的兩個用戶（使用傳入的用戶嵌入）
+        similar_users, similarity_scores = find_similar_users(user_embeddings, target_user_id, num_similar_users=2)
+        
+        # 為每個相似用戶顯示推薦
+        for i, (similar_user_id, similarity_score) in enumerate(zip(similar_users, similarity_scores)):
+            # 獲取該用戶看過的高分電影
+            watched_movies = get_user_watched_movies(similar_user_id, reverse_uid_map, reverse_mid_map, num_movies=5)
+            
+            if watched_movies:
+                output_container.subheader(f"🎬 用戶 {similar_user_id} 跟你看過類似的電影，所以你也可能喜歡看這些電影")
+                output_container.info(f"相似度: {similarity_score:.4f}")
+                
+                # 創建推薦表格
+                col1, col2, col3, col4, col5 = output_container.columns([1, 1, 4, 3, 2])
+                with col1:
+                    output_container.write("**排名**")
+                with col2:
+                    output_container.write("**電影ID**")
+                with col3:
+                    output_container.write("**電影名稱**")
+                with col4:
+                    output_container.write("**類型**")
+                with col5:
+                    output_container.write("**用戶評分**")
+                
+                output_container.write("---")
+                
+                # 顯示推薦電影
+                for j, movie_data in enumerate(watched_movies):
+                    movie_id = movie_data['movie_id']
+                    rating = movie_data['rating']
+                    
+                    movie_info = movies_info.get(movie_id, {})
+                    movie_title = movie_info.get('title', '未知電影')
+                    movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                    
+                    col1, col2, col3, col4, col5 = output_container.columns([1, 1, 4, 3, 2])
+                    
+                    with col1:
+                        output_container.write(f"**{j+1}**")
+                    with col2:
+                        output_container.write(f"{movie_id}")
+                    with col3:
+                        output_container.write(f"**{movie_title}**")
+                    with col4:
+                        output_container.write(f"{movie_genres}")
+                    with col5:
+                        output_container.write(f"⭐ {rating}")
+                
+                if i < len(similar_users) - 1:  # 如果不是最後一個用戶，添加分隔線
+                    output_container.markdown("---")
+            else:
+                output_container.warning(f"用戶 {similar_user_id} 沒有足夠的觀看記錄")
+        
+        # 切換回原目錄
+        os.chdir(original_dir)
+        
+    except Exception as e:
+        output_container.error(f"社群推薦功能出錯: {str(e)}")
+        # 確保切換回原目錄
+        try:
+            os.chdir(original_dir)
+        except:
+            pass
+
