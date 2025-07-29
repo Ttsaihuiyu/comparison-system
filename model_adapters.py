@@ -1,113 +1,272 @@
-import os
-import sys
-import torch
-import numpy as np
+# model_adapters.py
 import pandas as pd
-from pathlib import Path
+import torch
+import torch.nn as nn
+import os
 import pickle
+import sys
+from pathlib import Path
 from datetime import datetime
+import numpy as np
 
-# Add RL_recommender to Python path
-RL_RECOMMENDER_PATH = Path("../RL_recommender").resolve()
+# 🔧 直接在這裡定義所有需要的類和函數，不依賴外部導入！
+
+# ====== 直接複製 LightGCNConv ======
+try:
+    from torch_geometric.nn import MessagePassing
+    
+    class LightGCNConv(MessagePassing):
+        def __init__(self): 
+            super().__init__(aggr='add')
+        
+        def forward(self, x, edge_index):
+            row, col = edge_index
+            deg = torch.bincount(row, minlength=x.size(0)).float()
+            deg_inv_sqrt = deg.pow(-0.5)
+            deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+            norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+            return self.propagate(edge_index, x=x, norm=norm)
+        
+        def message(self, x_j, norm): 
+            return norm.view(-1, 1) * x_j
+    
+except ImportError:
+    print("⚠️ torch_geometric 未安裝，使用簡化版本")
+    
+    class LightGCNConv(nn.Module):
+        """簡化版 LightGCNConv，不依賴 torch_geometric"""
+        def __init__(self):
+            super().__init__()
+        
+        def forward(self, x, edge_index):
+            row, col = edge_index
+            deg = torch.bincount(row, minlength=x.size(0)).float()
+            deg_inv_sqrt = deg.pow(-0.5)
+            deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+            edge_weight = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+            
+            # 手動實現消息傳播
+            out = torch.zeros_like(x)
+            for i in range(edge_index.shape[1]):
+                src, dst = edge_index[0, i], edge_index[1, i]
+                out[dst] += edge_weight[i] * x[src]
+            
+            return out
+
+# ====== 直接複製 LightGCN ======
+class LightGCN(nn.Module):
+    def __init__(self, num_users, num_items, emb_size=64, n_layers=2):
+        super().__init__()
+        self.num_users, self.num_items = num_users, num_items
+        self.embedding = nn.Embedding(num_users + num_items, emb_size)
+        nn.init.xavier_uniform_(self.embedding.weight)
+        self.convs = nn.ModuleList([LightGCNConv() for _ in range(n_layers)])
+    
+    def forward(self, edge_index):
+        x = self.embedding.weight
+        embs = [x]
+        for conv in self.convs:
+            x = conv(x, edge_index)
+            embs.append(x)
+        return torch.stack(embs).mean(0)
+    
+    def get_user_item(self, edge_index):
+        all_emb = self(edge_index)
+        return all_emb[:self.num_users], all_emb[self.num_users:]
+
+# ====== 直接複製 build_edge_index ======
+def build_edge_index(pairs, num_users):
+    """構建雙向邊索引"""
+    edges = []
+    for u, i in pairs:
+        edges.append((u, i + num_users))
+        edges.append((i + num_users, u))
+    return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+# ====== 原有的全域變數和函數 ======
+RL_RECOMMENDER_PATH = Path(__file__).parent.parent / "RL_recommender"
 sys.path.append(str(RL_RECOMMENDER_PATH))
 
-def load_movie_info():
+# Global variable to cache model and edge_index
+_cached_model = None
+_cached_edge_index = None
+_cached_n_user = None
+_cached_n_item = None
+
+def initialize_model_for_dynamic_updates():
     """
-    載入電影信息（ID、標題、類型）
+    超簡化版：直接載入模型用於動態更新（所有類都在本文件中定義）
     """
-    movies_file = RL_RECOMMENDER_PATH / "raw" / "ml-1m" / "movies.dat"
-    movies_dict = {}
+    global _cached_model, _cached_edge_index, _cached_n_user, _cached_n_item
     
-    with open(movies_file, 'r', encoding='latin-1') as f:
-        for line in f:
-            parts = line.strip().split("::")
-            if len(parts) >= 3:
-                movie_id = int(parts[0])
-                title = parts[1]
-                genres = parts[2].split("|")
-                movies_dict[movie_id] = {
-                    'title': title,
-                    'genres': genres
-                }
-    return movies_dict
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 載入映射信息
+        with open('mapping/uid_map.pkl', 'rb') as f:
+            uid_map = pickle.load(f)
+        with open('mapping/mid_map.pkl', 'rb') as f:
+            mid_map = pickle.load(f)
+        
+        n_user = len(uid_map)
+        n_item = len(mid_map)
+        
+        # 載入 embeddings
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_emb = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
+        item_emb = torch.load("model/RS/item_emb.pt", map_location=device, weights_only=True)
+        
+        # 🎯 現在用本文件中定義的 LightGCN！
+        model = LightGCN(n_user, n_item, emb_size=64, n_layers=2).to(device)
+        combined_emb = torch.cat([user_emb, item_emb], dim=0)
+        model.embedding.weight.data = combined_emb
+        
+        # 🎯 現在用本文件中定義的 build_edge_index！
+        train_df = pd.read_csv('data/train.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
+        interactions = [(row['user_id'], row['movie_id']) for _, row in train_df.iterrows()]
+        edge_index = build_edge_index(interactions, n_user).to(device)
+        
+        # 儲存到全域變數
+        _cached_model = model
+        _cached_edge_index = edge_index
+        _cached_n_user = n_user
+        _cached_n_item = n_item
+        
+        os.chdir(original_dir)
+        print(f"✅ 模型初始化完成 - 用戶: {n_user}, 物品: {n_item}, 邊數: {edge_index.shape[1]}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ 模型初始化失敗: {str(e)}")
+        import traceback
+        print(f"❌ 詳細錯誤: {traceback.format_exc()}")
+        if 'original_dir' in locals():
+            os.chdir(original_dir)
+        return False
+
+def update_embeddings_after_like(user_id, movie_id):
+    """
+    超簡化版：點讚後直接更新並重新計算
+    """
+    global _cached_model, _cached_edge_index, _cached_n_user
+    
+    if _cached_model is None:
+        print("⚠️ 模型未初始化")
+        return None, None
+    
+    try:
+        # 添加新邊
+        device = _cached_edge_index.device
+        new_edges = torch.tensor([
+            [user_id, movie_id + _cached_n_user],
+            [movie_id + _cached_n_user, user_id]
+        ], device=device).t()
+        
+        # 更新 edge_index
+        updated_edge_index = torch.cat([_cached_edge_index, new_edges], dim=1)
+        updated_edge_index = torch.unique(updated_edge_index, dim=1)
+        
+        # 🎯 您說的：直接執行這個 function！
+        with torch.no_grad():
+            new_user_emb, new_item_emb = _cached_model.get_user_item(updated_edge_index)
+        
+        # 更新快取
+        _cached_edge_index = updated_edge_index
+        
+        print(f"✅ 直接執行 get_user_item() 完成！用戶{user_id}喜歡電影{movie_id}")
+        return new_user_emb, new_item_emb
+        
+    except Exception as e:
+        print(f"❌ 更新失敗: {str(e)}")
+        import traceback
+        print(f"❌ 詳細錯誤: {traceback.format_exc()}")
+        return None, None
+
+def get_dynamic_recommendations(user_id, num_recommendations=20, exclude_ids=None):
+    """
+    使用動態更新的 embeddings 生成推薦
+    """
+    # 先嘗試獲取更新後的 embeddings
+    user_emb, item_emb = update_embeddings_after_like(user_id, 0)  # dummy call to get current embeddings
+    
+    if user_emb is None:
+        return None, None
+    
+    with torch.no_grad():
+        user_vec = user_emb[user_id].unsqueeze(0)
+        scores = torch.mm(user_vec, item_emb.t()).squeeze()
+        
+        if exclude_ids:
+            scores[exclude_ids] = -float('inf')
+        
+        top_scores, top_items = torch.topk(scores, num_recommendations)
+        return top_items.cpu().numpy(), top_scores.cpu().numpy()
+
+def load_movie_info():
+    try:
+        movies_df = pd.read_csv(RL_RECOMMENDER_PATH / "raw" / "ml-1m" / "movies.dat", 
+                               sep='::', names=['Movie_ID', 'Title', 'Genres'], 
+                               engine='python', encoding='latin-1')
+        movies_info = {}
+        for _, row in movies_df.iterrows():
+            genres = row['Genres'].split('|') if pd.notna(row['Genres']) else ['Unknown']
+            movies_info[row['Movie_ID']] = {
+                'title': row['Title'],
+                'genres': genres
+            }
+        return movies_info
+    except Exception as e:
+        print(f"Error loading movie info: {e}")
+        return {}
 
 def load_user_info():
-    """
-    載入用戶信息（ID、性別、年齡、職業）
-    """
-    users_file = RL_RECOMMENDER_PATH / "raw" / "ml-1m" / "users.dat"
-    users_dict = {}
-    
-    # 年齡段映射
-    age_map = {
-        1: "18歲以下",
-        18: "18-24歲",
-        25: "25-34歲",
-        35: "35-44歲",
-        45: "45-49歲",
-        50: "50-55歲",
-        56: "56歲以上"
-    }
-    
-    # 職業映射
-    occupation_map = {
-        0: "其他/未指定",
-        1: "學術/教育工作者",
-        2: "藝術家",
-        3: "文職/行政",
-        4: "大學生/研究生",
-        5: "客戶服務",
-        6: "醫生/醫療保健",
-        7: "高級管理",
-        8: "農民",
-        9: "家庭主婦",
-        10: "中小學生",
-        11: "律師",
-        12: "程序員",
-        13: "退休",
-        14: "銷售/市場",
-        15: "科學家",
-        16: "自由職業",
-        17: "技術員/工程師",
-        18: "工匠",
-        19: "無業",
-        20: "作家"
-    }
-    
-    with open(users_file, 'r', encoding='latin-1') as f:
-        for line in f:
-            parts = line.strip().split("::")
-            if len(parts) >= 5:
-                user_id = int(parts[0])
-                gender = "男" if parts[1] == "M" else "女"
-                age = age_map.get(int(parts[2]), f"{parts[2]}歲")
-                occupation = occupation_map.get(int(parts[3]), "未知職業")
-                zip_code = parts[4]
-                
-                users_dict[user_id] = {
-                    'gender': gender,
-                    'age': age,
-                    'occupation': occupation,
-                    'zip_code': zip_code
-                }
-    return users_dict
+    try:
+        users_df = pd.read_csv(RL_RECOMMENDER_PATH / "raw" / "ml-1m" / "users.dat", 
+                              sep='::', names=['User_ID', 'Gender', 'Age', 'Occupation', 'Zip'], 
+                              engine='python')
+        users_info = {}
+        for _, row in users_df.iterrows():
+            users_info[row['User_ID']] = {
+                'gender': row['Gender'],
+                'age': row['Age'],
+                'occupation': row['Occupation'],
+                'zip': row['Zip']
+            }
+        return users_info
+    except Exception as e:
+        print(f"Error loading user info: {e}")
+        return {}
+
+def load_mapping_files():
+    try:
+        uid_map_file = RL_RECOMMENDER_PATH / "mapping" / "uid_map.pkl"
+        mid_map_file = RL_RECOMMENDER_PATH / "mapping" / "mid_map.pkl"
+        
+        with open(uid_map_file, 'rb') as f:
+            uid_map = pickle.load(f)
+        with open(mid_map_file, 'rb') as f:
+            mid_map = pickle.load(f)
+        
+        reverse_uid_map = {v: k for k, v in uid_map.items()}
+        reverse_mid_map = {v: k for k, v in mid_map.items()}
+        
+        return uid_map, mid_map, reverse_uid_map, reverse_mid_map, True
+    except Exception as e:
+        print(f"Error loading mapping files: {e}")
+        return None, None, None, None, False
 
 def get_user_recommendations(user_embeddings, item_embeddings, user_id, num_recommendations=20, exclude_ids=None):
-    """
-    為特定用戶生成電影推薦，可選擇排除已觀看電影
-    """
+    """基本推薦功能"""
     with torch.no_grad():
-        # 計算用戶和所有電影的相似度
-        user_emb = user_embeddings[user_id].unsqueeze(0)  # shape: (1, emb_dim)
-        scores = torch.mm(user_emb, item_embeddings.t()).squeeze()  # shape: (num_items,)
+        user_emb = user_embeddings[user_id].unsqueeze(0)
+        scores = torch.mm(user_emb, item_embeddings.t()).squeeze()
         
-        # 如果有要排除的電影，將其分數設為負無窮大
         if exclude_ids and isinstance(exclude_ids, list) and len(exclude_ids) > 0:
             scores[exclude_ids] = -float('inf')
         
-        # 獲取 top-k 推薦
         top_scores, top_items = torch.topk(scores, num_recommendations)
-        
         return top_items.cpu().numpy(), top_scores.cpu().numpy()
 
 def find_similar_users(user_embeddings, target_user_id, num_similar_users=2):
@@ -363,96 +522,29 @@ def check_model_dependencies():
     except Exception as e:
         return False, f"依賴檢查出錯: {str(e)}"
 
-def load_mapping_files():
-    """
-    载入用户和电影的映射文件
-    """
+def get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map):
     try:
-        # 载入映射关系
-        uid_map_file = RL_RECOMMENDER_PATH / "mapping" / "uid_map.pkl"
-        mid_map_file = RL_RECOMMENDER_PATH / "mapping" / "mid_map.pkl"
+        original_user_id = reverse_uid_map.get(target_user_id, target_user_id)
+        interaction_file = RL_RECOMMENDER_PATH / "interaction_collect" / f"user_{original_user_id}_interactions.csv"
         
-        with open(uid_map_file, 'rb') as f:
-            uid_map = pickle.load(f)
-        with open(mid_map_file, 'rb') as f:
-            mid_map = pickle.load(f)
-        
-        # 创建反向映射（从新ID到旧ID）
-        reverse_uid_map = {v: k for k, v in uid_map.items()}
-        reverse_mid_map = {v: k for k, v in mid_map.items()}
-        
-        return uid_map, mid_map, reverse_uid_map, reverse_mid_map, True
-    except Exception as e:
-        print(f"载入映射文件失败: {str(e)}")
-        return {}, {}, {}, {}, False
-
-def get_user_interactions(user_id, reverse_uid_map, reverse_mid_map):
-    """
-    获取用户的历史交互记录
-    """
-    try:
-        # 读取数据
-        train_df = pd.read_csv(RL_RECOMMENDER_PATH / 'data/train.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
-        val_df = pd.read_csv(RL_RECOMMENDER_PATH / 'data/val.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
-        test_df = pd.read_csv(RL_RECOMMENDER_PATH / 'data/test.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
-        
-        movies = pd.read_csv(RL_RECOMMENDER_PATH / 'raw/ml-1m/movies.dat', sep='::', names=['movie_id', 'title', 'genres'], engine='python', encoding='latin-1')
-        
-        combined = pd.concat([train_df, val_df, test_df])
-        
-        # 找到该用户的所有交互记录
-        user_interactions = combined[combined['user_id'] == user_id].copy()
-        
-        if user_interactions.empty:
-            return pd.DataFrame(), []
-        
-        # 将movie_id转换回原始ID
-        user_interactions['original_movie_id'] = user_interactions['movie_id'].map(reverse_mid_map)
-        
-        # 与movies数据合并
-        result = pd.merge(
-            user_interactions,
-            movies,
-            left_on='original_movie_id',
-            right_on='movie_id',
-            how='left'
-        )
-        
-        # 选择要显示的栏位并重新命名
-        result = result[['original_movie_id', 'title', 'genres', 'rating', 'timestamp']]
-        result.columns = ['Movie_ID', 'Title', 'Genres', 'Rating', 'Timestamp']
-        
-        # 檢查重複電影並優先顯示重複的記錄
-        movie_counts = result['Movie_ID'].value_counts()
-        duplicated_movies = movie_counts[movie_counts > 1].index.tolist()
-        
-        if duplicated_movies:
-            # 分離重複和非重複記錄
-            duplicated_records = result[result['Movie_ID'].isin(duplicated_movies)]
-            non_duplicated_records = result[~result['Movie_ID'].isin(duplicated_movies)]
+        if interaction_file.exists():
+            user_interactions_df = pd.read_csv(interaction_file)
+            watched_movie_ids = []
+            for movie_id in user_interactions_df['Movie_ID']:
+                mapped_id = None
+                for mapped, original in reverse_mid_map.items():
+                    if original == movie_id:
+                        mapped_id = mapped
+                        break
+                if mapped_id is not None:
+                    watched_movie_ids.append(mapped_id)
             
-            # 重複記錄按Movie_ID排序，非重複記錄按時間戳排序
-            duplicated_records = duplicated_records.sort_values(['Movie_ID', 'Timestamp'])
-            non_duplicated_records = non_duplicated_records.sort_values('Timestamp', ascending=False)
-            
-            # 重複記錄優先，然後是非重複記錄
-            result = pd.concat([duplicated_records, non_duplicated_records], ignore_index=True)
+            return user_interactions_df, watched_movie_ids
         else:
-            # 如果沒有重複，按時間戳降序排列
-            result = result.sort_values('Timestamp', ascending=False)
-        
-        # 保存到CSV文件
-        interaction_file = RL_RECOMMENDER_PATH / "interaction_collect" / f"user_{user_id}_interactions.csv"
-        result.to_csv(interaction_file, index=False)
-        
-        # 返回用户看过的电影ID列表
-        watched_movie_ids = user_interactions['movie_id'].tolist()
-        
-        return result, watched_movie_ids
-        
+            return pd.DataFrame(columns=['Movie_ID', 'Title', 'Genres', 'Rating', 'Timestamp']), []
     except Exception as e:
-        print(f"获取用户交互记录失败: {str(e)}")
-        return pd.DataFrame(), []
+        print(f"Error getting user interactions: {e}")
+        return pd.DataFrame(columns=['Movie_ID', 'Title', 'Genres', 'Rating', 'Timestamp']), []
 
 def add_to_liked_movies(user_id, movie_info, liked_movies_file):
     """
@@ -501,26 +593,19 @@ def get_user_liked_movies(user_id):
         return pd.DataFrame()
 
 def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map):
-    """
-    將電影添加到用戶的交互記錄中
-    """
     try:
         print(f"🔍 開始處理: 用戶{user_id}, 原始電影ID{original_movie_id}")
         
-        # 切換到 RL_recommender 目錄
         original_dir = os.getcwd()
         os.chdir(RL_RECOMMENDER_PATH)
         print(f"📁 切換到目錄: {RL_RECOMMENDER_PATH}")
         
-        # 讀取現有的交互記錄
         train_file = "data/train.dat"
         
-        # 檢查電影ID映射 - 從原始ID映射到模型使用的ID
         mid_map_file = RL_RECOMMENDER_PATH / "mapping" / "mid_map.pkl"
         with open(mid_map_file, 'rb') as f:
             mid_map = pickle.load(f)
         
-        # 將原始電影ID轉換為映射後的ID（用於存儲到train.dat）
         mapped_movie_id = mid_map.get(original_movie_id)
         if mapped_movie_id is None:
             print(f"❌ 原始電影ID {original_movie_id} 不在映射中")
@@ -529,20 +614,26 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
         
         print(f"✅ 電影ID映射成功: 原始ID{original_movie_id} -> 映射ID{mapped_movie_id}")
         
-        # 生成新的交互記錄
         current_timestamp = int(datetime.now().timestamp())
-        new_interaction = f"{user_id},{mapped_movie_id},5,{current_timestamp}\n"  # 給予5星評分
+        new_interaction = f"{user_id},{mapped_movie_id},5,{current_timestamp}\n"
         print(f"📝 新交互記錄: {new_interaction.strip()}")
         
-        # 將新記錄添加到訓練數據中
         with open(train_file, 'a', encoding='utf-8') as f:
             f.write(new_interaction)
         print(f"✅ 已添加到 {train_file}")
         
-        # 同時保存到單獨的用戶交互文件
+        # 🎯 超簡化版：直接調用 get_user_item()
+        try:
+            new_user_emb, new_item_emb = update_embeddings_after_like(user_id, mapped_movie_id)
+            if new_user_emb is not None:
+                print(f"🎉 直接執行 get_user_item() 成功！")
+            else:
+                print(f"⚠️ 動態更新失敗，但數據已保存")
+        except Exception as embed_error:
+            print(f"⚠️ 動態更新遇到問題: {str(embed_error)}")
+        
         interaction_file = f"interaction_collect/user_{user_id}_interactions.csv"
         
-        # 創建新記錄的數據框（使用原始電影ID）
         new_record = pd.DataFrame({
             'Movie_ID': [original_movie_id],
             'Title': [movie_info.get('title', '未知電影')],
@@ -551,10 +642,8 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
             'Timestamp': [current_timestamp]
         })
         
-        # 如果文件存在，讀取現有記錄並添加新記錄
         if os.path.exists(interaction_file):
             existing_df = pd.read_csv(interaction_file)
-            # 檢查是否已經存在該電影記錄
             if original_movie_id not in existing_df['Movie_ID'].values:
                 updated_df = pd.concat([new_record, existing_df], ignore_index=True)
                 updated_df.to_csv(interaction_file, index=False)
@@ -579,11 +668,9 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
 
 def get_recommendations_data(target_user_id, num_recommendations=20):
     try:
-        # 切換到 RL_recommender 目錄
         original_dir = os.getcwd()
         os.chdir(RL_RECOMMENDER_PATH)
         
-        # 載入用戶和電影信息
         movies_info = load_movie_info()
         users_info = load_user_info()
         
@@ -591,29 +678,45 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
         user_embeddings = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
         item_embeddings = torch.load("model/RS/item_emb.pt", map_location=device, weights_only=True)
         
-        # 載入映射文件
         uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
         
         if not mapping_success:
             os.chdir(original_dir)
             return None, "無法載入映射文件"
         
-        # 先獲取用戶歷史交互記錄，以便在推薦中過濾
+        # 🎯 簡化版：初始化模型（隊友建議的功能）
+        try:
+            if initialize_model_for_dynamic_updates():
+                print("🎯 模型初始化成功，支援動態更新")
+            else:
+                print("⚠️ 模型初始化失敗，使用原始方法")
+                
+        except Exception as cache_error:
+            print(f"⚠️ 模型初始化失敗: {str(cache_error)}")
+        
         user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
         
-        # 檢查用戶ID是否有效
         if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
             error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
             os.chdir(original_dir)
             return None, error_msg
         
-        # 為特定用戶生成推薦，並排除已觀看電影
-        recommended_items, scores = get_user_recommendations(
-            user_embeddings, item_embeddings, target_user_id, num_recommendations,
-            exclude_ids=watched_movie_ids
-        )
+        # 🔄 嘗試使用動態更新的 embeddings
+        try:
+            recommended_items, scores = get_dynamic_recommendations(
+                target_user_id, num_recommendations, exclude_ids=watched_movie_ids
+            )
+            if recommended_items is not None:
+                print("✅ 使用動態更新的 embeddings 生成推薦")
+            else:
+                raise Exception("動態推薦失敗")
+        except:
+            recommended_items, scores = get_user_recommendations(
+                user_embeddings, item_embeddings, target_user_id, num_recommendations,
+                exclude_ids=watched_movie_ids
+            )
+            print("⚠️ 使用原始 embeddings 生成推薦")
         
-        # 準備返回數據
         recommendations_data = {
             'user_id': target_user_id,
             'recommended_items': recommended_items,
@@ -624,18 +727,28 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
             'watched_movie_ids': watched_movie_ids,
             'reverse_uid_map': reverse_uid_map,
             'reverse_mid_map': reverse_mid_map,
-            'user_embeddings': user_embeddings  # 添加用戶嵌入，用於社群推薦
+            'user_embeddings': user_embeddings
         }
         
-        # 切換回原目錄
         os.chdir(original_dir)
-        
         return recommendations_data, "成功生成推薦"
         
     except Exception as e:
         error_msg = f"推薦生成出錯: {str(e)}"
         os.chdir(original_dir)
         return None, error_msg
+
+def get_simulator_recommendations_data(target_user_id, num_recommendations=20):
+    data, msg = run_simulator_exposure(target_user_id, num_recommendations)
+    if data is None:
+        return None, msg
+    
+    movies_info = load_movie_info()
+    users_info = load_user_info()
+    data['movies_info'] = movies_info
+    data['users_info'] = users_info
+    
+    return data, msg
 
 def display_recommendations(output_container, recommendations_data):
     """
@@ -991,70 +1104,6 @@ def run_simulator_exposure(output_container=None, target_user_id=None, num_recom
             output_container.error(error_msg)
         os.chdir(original_dir)
         return error_msg
-
-def get_simulator_recommendations_data(target_user_id, num_recommendations=20):
-    """
-    獲取 Simulator 推薦數據
-    """
-    try:
-        # 切換到 RL_recommender 目錄
-        original_dir = os.getcwd()
-        os.chdir(RL_RECOMMENDER_PATH)
-        
-        # 載入用戶和電影信息
-        movies_info = load_movie_info()
-        users_info = load_user_info()
-        
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # 使用 simulator 目錄中的原始 embeddings
-        user_embeddings = torch.load("model/simulator/user_emb.pt", map_location=device, weights_only=True)
-        item_embeddings = torch.load("model/simulator/item_emb.pt", map_location=device, weights_only=True)
-        
-        # 載入映射文件
-        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
-        
-        if not mapping_success:
-            os.chdir(original_dir)
-            return None, "無法載入映射文件"
-        
-        # 先獲取用戶歷史交互記錄，以便在推薦中過濾
-        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
-        
-        # 檢查用戶ID是否有效
-        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
-            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
-            os.chdir(original_dir)
-            return None, error_msg
-        
-        # 為特定用戶生成推薦，並排除已觀看電影
-        recommended_items, scores = get_user_recommendations(
-            user_embeddings, item_embeddings, target_user_id, num_recommendations,
-            exclude_ids=watched_movie_ids
-        )
-        
-        # 準備返回數據
-        recommendations_data = {
-            'user_id': target_user_id,
-            'recommended_items': recommended_items,
-            'scores': scores,
-            'movies_info': movies_info,
-            'users_info': users_info,
-            'user_interactions_df': user_interactions_df,
-            'watched_movie_ids': watched_movie_ids,
-            'reverse_uid_map': reverse_uid_map,
-            'reverse_mid_map': reverse_mid_map,
-            'user_embeddings': user_embeddings  # 添加用戶嵌入，用於社群推薦
-        }
-        
-        # 切換回原目錄
-        os.chdir(original_dir)
-        
-        return recommendations_data, "成功生成推薦"
-        
-    except Exception as e:
-        error_msg = f"推薦生成出錯: {str(e)}"
-        os.chdir(original_dir)
-        return None, error_msg
 
 def display_simulator_recommendations(output_container, recommendations_data):
     """
