@@ -12,25 +12,36 @@ import numpy as np
 # 🔧 直接在這裡定義所有需要的類和函數，不依賴外部導入！
 
 # ====== 直接複製 LightGCNConv ======
-try:
-    from torch_geometric.nn import MessagePassing
-    
-    class LightGCNConv(MessagePassing):
-        def __init__(self): 
-            super().__init__(aggr='add')
+# 使用條件導入避免 IDE 報錯
+import importlib.util
+
+TORCH_GEOMETRIC_AVAILABLE = importlib.util.find_spec("torch_geometric") is not None
+
+if TORCH_GEOMETRIC_AVAILABLE:
+    try:
+        from torch_geometric.nn import MessagePassing
         
-        def forward(self, x, edge_index):
-            row, col = edge_index
-            deg = torch.bincount(row, minlength=x.size(0)).float()
-            deg_inv_sqrt = deg.pow(-0.5)
-            deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
-            norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
-            return self.propagate(edge_index, x=x, norm=norm)
+        class LightGCNConv(MessagePassing):
+            def __init__(self): 
+                super().__init__(aggr='add')
+            
+            def forward(self, x, edge_index):
+                row, col = edge_index
+                deg = torch.bincount(row, minlength=x.size(0)).float()
+                deg_inv_sqrt = deg.pow(-0.5)
+                deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+                norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+                return self.propagate(edge_index, x=x, norm=norm)
+            
+            def message(self, x_j, norm): 
+                return norm.view(-1, 1) * x_j
         
-        def message(self, x_j, norm): 
-            return norm.view(-1, 1) * x_j
-    
-except ImportError:
+        print("✅ 使用 torch_geometric 版本的 LightGCNConv")
+        
+    except ImportError:
+        TORCH_GEOMETRIC_AVAILABLE = False
+
+if not TORCH_GEOMETRIC_AVAILABLE:
     print("⚠️ torch_geometric 未安裝，使用簡化版本")
     
     class LightGCNConv(nn.Module):
@@ -524,6 +535,7 @@ def check_model_dependencies():
 
 def get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map):
     try:
+        # 1️⃣ 首先嘗試讀取用戶專門的交互記錄文件（向後兼容）
         original_user_id = reverse_uid_map.get(target_user_id, target_user_id)
         interaction_file = RL_RECOMMENDER_PATH / "interaction_collect" / f"user_{original_user_id}_interactions.csv"
         
@@ -540,10 +552,69 @@ def get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map):
                     watched_movie_ids.append(mapped_id)
             
             return user_interactions_df, watched_movie_ids
+        
+        # 2️⃣ 直接從 /data 目錄讀取歷史交互資料
         else:
-            return pd.DataFrame(columns=['Movie_ID', 'Title', 'Genres', 'Rating', 'Timestamp']), []
+            print(f"📁 從 /data 目錄讀取用戶 {target_user_id} 的歷史交互記錄")
+            
+            # 讀取所有數據文件
+            data_files = ['train.dat', 'val.dat', 'test.dat']
+            all_interactions = []
+            
+            for data_file in data_files:
+                file_path = RL_RECOMMENDER_PATH / "data" / data_file
+                if file_path.exists():
+                    try:
+                        df = pd.read_csv(file_path, sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
+                        user_data = df[df['user_id'] == target_user_id]
+                        if not user_data.empty:
+                            all_interactions.append(user_data)
+                            print(f"✅ 從 {data_file} 中找到 {len(user_data)} 條記錄")
+                    except Exception as e:
+                        print(f"⚠️ 讀取 {data_file} 失敗: {str(e)}")
+            
+            if not all_interactions:
+                print(f"📭 用戶 {target_user_id} 沒有任何歷史交互記錄")
+                return pd.DataFrame(columns=['Movie_ID', 'Title', 'Genres', 'Rating', 'Timestamp']), []
+            
+            # 合併所有交互記錄
+            combined_interactions = pd.concat(all_interactions, ignore_index=True)
+            
+            # 載入電影信息用於創建詳細記錄
+            movies_info = load_movie_info()
+            
+            # 轉換為用戶交互格式
+            user_interactions_data = []
+            watched_movie_ids = []
+            
+            for _, row in combined_interactions.iterrows():
+                mapped_movie_id = row['movie_id']  # 已經是映射後的ID
+                
+                # 轉換回原始電影ID用於顯示
+                original_movie_id = reverse_mid_map.get(mapped_movie_id)
+                if original_movie_id is not None:
+                    movie_info = movies_info.get(original_movie_id, {})
+                    
+                    user_interactions_data.append({
+                        'Movie_ID': original_movie_id,
+                        'Title': movie_info.get('title', '未知電影'),
+                        'Genres': ' | '.join(movie_info.get('genres', ['未知'])),
+                        'Rating': row['rating'],
+                        'Timestamp': row['timestamp']
+                    })
+                    
+                    # 添加到觀看過的電影列表（使用映射後的ID）
+                    watched_movie_ids.append(mapped_movie_id)
+            
+            user_interactions_df = pd.DataFrame(user_interactions_data)
+            print(f"📊 用戶 {target_user_id} 總共有 {len(user_interactions_df)} 條歷史交互記錄")
+            
+            return user_interactions_df, watched_movie_ids
+            
     except Exception as e:
-        print(f"Error getting user interactions: {e}")
+        print(f"❌ 獲取用戶交互記錄失敗: {str(e)}")
+        import traceback
+        print(f"❌ 詳細錯誤: {traceback.format_exc()}")
         return pd.DataFrame(columns=['Movie_ID', 'Title', 'Genres', 'Rating', 'Timestamp']), []
 
 def add_to_liked_movies(user_id, movie_info, liked_movies_file):
@@ -739,7 +810,13 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
         return None, error_msg
 
 def get_simulator_recommendations_data(target_user_id, num_recommendations=20):
-    data, msg = run_simulator_exposure(target_user_id, num_recommendations)
+    """
+    獲取 Simulator 模型的推薦數據，但不顯示
+    """
+    data, msg = run_simulator_exposure(
+        target_user_id=target_user_id, 
+        num_recommendations=num_recommendations
+    )
     if data is None:
         return None, msg
     
@@ -934,7 +1011,7 @@ def display_recommendations(output_container, recommendations_data):
         except:
             pass
 
-def run_simulator_exposure(output_container=None, target_user_id=None, num_recommendations=20):
+def run_simulator_exposure(target_user_id=None, num_recommendations=20):
     """
     運行 Simulator Exposure 模型 - 使用 simulator 目錄中的原始 user embedding 和 item embedding
     """
@@ -957,10 +1034,8 @@ def run_simulator_exposure(output_container=None, target_user_id=None, num_recom
         
         if not mapping_success:
             error_msg = "無法載入映射文件"
-            if output_container:
-                output_container.error(error_msg)
             os.chdir(original_dir)
-            return error_msg
+            return None, error_msg
         
         # 獲取用戶歷史交互記錄，以便過濾推薦
         user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
@@ -968,10 +1043,8 @@ def run_simulator_exposure(output_container=None, target_user_id=None, num_recom
         # 檢查用戶ID是否有效
         if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
             error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
-            if output_container:
-                output_container.error(error_msg)
             os.chdir(original_dir)
-            return error_msg
+            return None, error_msg
         
         # 為特定用戶生成推薦，並排除已觀看電影
         recommended_items, scores = get_user_recommendations(
@@ -982,128 +1055,25 @@ def run_simulator_exposure(output_container=None, target_user_id=None, num_recom
         # 切換回原目錄
         os.chdir(original_dir)
         
-        if output_container:
-            output_container.success("Simulator 推薦完成！")
-            
-            # 顯示用戶信息
-            user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
-            if user_info:
-                output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
-                # 使用表格形式確保完整顯示
-                import pandas as pd
-                user_data = pd.DataFrame({
-                    '性別': [user_info['gender']],
-                    '年齡': [user_info['age']],
-                    '職業': [user_info['occupation']],
-                    '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
-                })
-                output_container.dataframe(user_data, use_container_width=True, hide_index=True)
-
-            output_container.subheader(f"🎯 為用戶 {target_user_id} 的 Simulator 推薦結果")
-            
-            # 創建詳細的推薦結果表格
-            recommendations_data = []
-            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
-                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
-                original_movie_id = reverse_mid_map.get(item_id)
-                if original_movie_id is None:
-                    continue  # 跳過無法映射的電影
-                
-                movie_info = movies_info.get(original_movie_id, {})
-                movie_title = movie_info.get('title', '未知電影')
-                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
-                
-                recommendations_data.append({
-                    '排名': i + 1,
-                    '電影ID': original_movie_id,
-                    '電影名稱': movie_title,
-                    '類型': movie_genres,
-                    '推薦分數': f"{score:.4f}"
-                })
-            
-            recommendations_df = pd.DataFrame(recommendations_data)
-            
-            # 添加表格標題
-            col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
-            with col1:
-                output_container.write("**排名**")
-            with col2:
-                output_container.write("**電影ID**")
-            with col3:
-                output_container.write("**電影名稱**")
-            with col4:
-                output_container.write("**類型**")
-            with col5:
-                output_container.write("**推薦分數**")
-            with col6:
-                output_container.write("**喜愛**")
-            
-            output_container.write("---")
-            
-            # 顯示推薦結果表格，並為每行添加愛心按鈕
-            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
-                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
-                original_movie_id = reverse_mid_map.get(item_id)
-                if original_movie_id is None:
-                    continue  # 跳過無法映射的電影
-                
-                movie_info = movies_info.get(original_movie_id, {})
-                movie_title = movie_info.get('title', '未知電影')
-                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
-                
-                col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 1])
-                
-                with col1:
-                    output_container.write(f"**{i+1}**")
-                with col2:
-                    output_container.write(f"{original_movie_id}")  # 顯示原始電影ID
-                with col3:
-                    output_container.write(f"**{movie_title}**")
-                with col4:
-                    output_container.write(f"{movie_genres}")
-                with col5:
-                    output_container.write(f"{score:.4f}")
-                with col6:
-                    if output_container.button("❤️", key=f"sim_heart_{target_user_id}_{i}", help="加入我的最愛"):
-                        # 添加到用戶交互記錄，直接使用原始電影ID
-                        success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
-                        
-                        if success:
-                            output_container.success(f"❤️ 已將《{movie_title}》添加到交互記錄！")
-                            # 更新 session_state 中的交互記錄
-                            import streamlit as st
-                            if 'simulator_recommendations_data' in st.session_state:
-                                # 重新獲取更新後的交互記錄
-                                updated_interactions_df, updated_watched_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
-                                st.session_state.simulator_recommendations_data['user_interactions_df'] = updated_interactions_df
-                                st.session_state.simulator_recommendations_data['watched_movie_ids'] = updated_watched_ids
-                        else:
-                            output_container.error("❌ 添加失敗，請稍後再試")
-            
-            # 顯示用戶歷史交互記錄
-            if not user_interactions_df.empty:
-                output_container.subheader(f"📚 用戶 {target_user_id} 的歷史交互記錄")
-                output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
-                
-                # 按時間戳降序排列
-                sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
-                
-                # 顯示所有交互記錄
-                output_container.dataframe(sorted_interactions, use_container_width=True)
-                
-                # 顯示統計信息
-                output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
-            else:
-                output_container.warning("該用戶沒有歷史交互記錄")
-        
-        return f"成功為用戶 {target_user_id} 生成了 {len(recommended_items)} 部推薦電影"
+        return {
+            'user_id': target_user_id,
+            'recommended_items': recommended_items,
+            'scores': scores,
+            'user_interactions_df': user_interactions_df,
+            'watched_movie_ids': watched_movie_ids,
+            'reverse_uid_map': reverse_uid_map,
+            'reverse_mid_map': reverse_mid_map,
+            'user_embeddings': user_embeddings
+        }, f"成功為用戶 {target_user_id} 生成了 {len(recommended_items)} 部推薦電影"
         
     except Exception as e:
         error_msg = f"Simulator 推薦執行出錯: {str(e)}"
-        if output_container:
-            output_container.error(error_msg)
-        os.chdir(original_dir)
-        return error_msg
+        # 確保切換回原目錄
+        try:
+            os.chdir(original_dir)
+        except NameError: # original_dir可能尚未定義
+            pass
+        return None, error_msg
 
 def display_simulator_recommendations(output_container, recommendations_data):
     """

@@ -141,7 +141,10 @@ else:  # Simulator model
     if st.button(f"🚀 開始為用戶 {user_id} 推薦電影", key="simulator_btn", type="primary"):
         with st.spinner("🎬 正在分析您的偏好並生成推薦，請稍候..."):
             # 使用 user_id - 1 因為內部索引從0開始
-            simulator_recommendations_data, result_msg = get_simulator_recommendations_data(user_id - 1, num_recommendations)
+            simulator_recommendations_data, result_msg = get_simulator_recommendations_data(
+                target_user_id=user_id - 1, 
+                num_recommendations=num_recommendations
+            )
         
         if simulator_recommendations_data is not None:
             st.session_state.simulator_recommendations_data = simulator_recommendations_data
