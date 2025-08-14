@@ -1,4 +1,11 @@
 import streamlit as st
+import os
+import torch
+
+# 解決 streamlit 和 torch 的衝突
+if "STREAMLIT_SERVER_ENABLE_FILE_WATCHER" not in os.environ:
+    if "torch" in globals():
+        torch.classes.__path__ = []
 import time
 from model_adapters import (
     run_heuristic_exposure, 

@@ -105,9 +105,6 @@ _cached_n_user = None
 _cached_n_item = None
 
 def initialize_model_for_dynamic_updates():
-    """
-    超簡化版：直接載入模型用於動態更新（所有類都在本文件中定義）
-    """
     global _cached_model, _cached_edge_index, _cached_n_user, _cached_n_item
     
     try:
@@ -852,12 +849,23 @@ def display_recommendations(output_container, recommendations_data):
     user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
     if user_info:
         output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
+        
+        # 職業代碼到名稱的映射
+        occupation_map = {
+            0: "其他", 1: "學術/教育", 2: "藝術家", 3: "行政", 4: "大學/研究生",
+            5: "客戶服務", 6: "醫生/醫療保健", 7: "高階主管/管理", 8: "農夫", 9: "家庭主婦",
+            10: "K-12 學生", 11: "律師", 12: "程式設計師", 13: "退休", 14: "銷售/市場行銷",
+            15: "科學家", 16: "自僱人士", 17: "技術員/工程師", 18: "技工/工匠",
+            19: "失業", 20: "作家"
+        }
+        occupation_name = occupation_map.get(user_info['occupation'], "未知")
+
         # 使用表格形式確保完整顯示
         import pandas as pd
         user_data = pd.DataFrame({
             '性別': [user_info['gender']],
             '年齡': [user_info['age']],
-            '職業': [user_info['occupation']],
+            '職業': [occupation_name],
             '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
         })
         output_container.dataframe(user_data, use_container_width=True, hide_index=True)
@@ -1025,9 +1033,9 @@ def run_simulator_exposure(target_user_id=None, num_recommendations=20):
         users_info = load_user_info()
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # 使用 simulator 目錄中的原始 embeddings
-        user_embeddings = torch.load("model/simulator/user_emb.pt", map_location=device, weights_only=True)
-        item_embeddings = torch.load("model/simulator/item_emb.pt", map_location=device, weights_only=True)
+        # 使用 RS 目錄中的原始 embeddings
+        user_embeddings = torch.load("model/RS/user_emb_raw.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_raw.pt", map_location=device, weights_only=True)
         
         # 载入映射文件
         uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
@@ -1100,12 +1108,23 @@ def display_simulator_recommendations(output_container, recommendations_data):
     user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
     if user_info:
         output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
+        
+        # 職業代碼到名稱的映射
+        occupation_map = {
+            0: "其他", 1: "學術/教育", 2: "藝術家", 3: "行政", 4: "大學/研究生",
+            5: "客戶服務", 6: "醫生/醫療保健", 7: "高階主管/管理", 8: "農夫", 9: "家庭主婦",
+            10: "K-12 學生", 11: "律師", 12: "程式設計師", 13: "退休", 14: "銷售/市場行銷",
+            15: "科學家", 16: "自僱人士", 17: "技術員/工程師", 18: "技工/工匠",
+            19: "失業", 20: "作家"
+        }
+        occupation_name = occupation_map.get(user_info['occupation'], "未知")
+
         # 使用表格形式確保完整顯示
         import pandas as pd
         user_data = pd.DataFrame({
             '性別': [user_info['gender']],
             '年齡': [user_info['age']],
-            '職業': [user_info['occupation']],
+            '職業': [occupation_name],
             '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
         })
         output_container.dataframe(user_data, use_container_width=True, hide_index=True)
