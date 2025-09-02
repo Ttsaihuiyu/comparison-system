@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 import numpy as np
 
-# 🔧 直接在這裡定義所有需要的類和函數，不依賴外部導入！
+# 直接在這裡定義所有需要的類和函數，不依賴外部導入！
 
 # ====== 直接複製 LightGCNConv ======
 # 使用條件導入避免 IDE 報錯
@@ -36,13 +36,13 @@ if TORCH_GEOMETRIC_AVAILABLE:
             def message(self, x_j, norm): 
                 return norm.view(-1, 1) * x_j
         
-        print("✅ 使用 torch_geometric 版本的 LightGCNConv")
+        print("使用 torch_geometric 版本的 LightGCNConv")
         
     except ImportError:
         TORCH_GEOMETRIC_AVAILABLE = False
 
 if not TORCH_GEOMETRIC_AVAILABLE:
-    print("⚠️ torch_geometric 未安裝，使用簡化版本")
+    print("torch_geometric 未安裝，使用簡化版本")
     
     class LightGCNConv(nn.Module):
         """簡化版 LightGCNConv，不依賴 torch_geometric"""
@@ -104,6 +104,12 @@ _cached_edge_index = None
 _cached_n_user = None
 _cached_n_item = None
 
+# Additional caches for new heuristic models
+_cached_model_heur10 = None
+_cached_edge_index_heur10 = None
+_cached_model_heur20 = None
+_cached_edge_index_heur20 = None
+
 def initialize_model_for_dynamic_updates():
     global _cached_model, _cached_edge_index, _cached_n_user, _cached_n_item
     
@@ -121,17 +127,17 @@ def initialize_model_for_dynamic_updates():
         n_user = len(uid_map)
         n_item = len(mid_map)
         
-        # 載入 embeddings
+        # 載入 embeddings - 使用 heuristic 版本作為默認
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        user_emb = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
-        item_emb = torch.load("model/RS/item_emb.pt", map_location=device, weights_only=True)
+        user_emb = torch.load("model/RS/user_emb_heuristic.pt", map_location=device, weights_only=True)
+        item_emb = torch.load("model/RS/item_emb_heuristic.pt", map_location=device, weights_only=True)
         
-        # 🎯 現在用本文件中定義的 LightGCN！
+        # 現在用本文件中定義的 LightGCN！
         model = LightGCN(n_user, n_item, emb_size=64, n_layers=2).to(device)
         combined_emb = torch.cat([user_emb, item_emb], dim=0)
         model.embedding.weight.data = combined_emb
         
-        # 🎯 現在用本文件中定義的 build_edge_index！
+        # 現在用本文件中定義的 build_edge_index！
         train_df = pd.read_csv('data/train.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
         interactions = [(row['user_id'], row['movie_id']) for _, row in train_df.iterrows()]
         edge_index = build_edge_index(interactions, n_user).to(device)
@@ -143,13 +149,113 @@ def initialize_model_for_dynamic_updates():
         _cached_n_item = n_item
         
         os.chdir(original_dir)
-        print(f"✅ 模型初始化完成 - 用戶: {n_user}, 物品: {n_item}, 邊數: {edge_index.shape[1]}")
+        print(f"模型初始化完成 - 用戶: {n_user}, 物品: {n_item}, 邊數: {edge_index.shape[1]}")
         return True
         
     except Exception as e:
-        print(f"❌ 模型初始化失敗: {str(e)}")
+        print(f"模型初始化失敗: {str(e)}")
         import traceback
-        print(f"❌ 詳細錯誤: {traceback.format_exc()}")
+        print(f"詳細錯誤: {traceback.format_exc()}")
+        if 'original_dir' in locals():
+            os.chdir(original_dir)
+        return False
+
+def initialize_heuristic_10epoch_model():
+    global _cached_model_heur10, _cached_edge_index_heur10, _cached_n_user, _cached_n_item
+    
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 載入映射信息
+        with open('mapping/uid_map.pkl', 'rb') as f:
+            uid_map = pickle.load(f)
+        with open('mapping/mid_map.pkl', 'rb') as f:
+            mid_map = pickle.load(f)
+        
+        n_user = len(uid_map)
+        n_item = len(mid_map)
+        
+        # 載入 embeddings
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_emb = torch.load("model/RS/user_emb_heuristic.pt", map_location=device, weights_only=True)
+        item_emb = torch.load("model/RS/item_emb_heuristic.pt", map_location=device, weights_only=True)
+        
+        # 創建 heuristic 10 epoch 模型
+        model = LightGCN(n_user, n_item, emb_size=64, n_layers=2).to(device)
+        combined_emb = torch.cat([user_emb, item_emb], dim=0)
+        model.embedding.weight.data = combined_emb
+        
+        # 建立 edge index
+        train_df = pd.read_csv('data/train.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
+        interactions = [(row['user_id'], row['movie_id']) for _, row in train_df.iterrows()]
+        edge_index = build_edge_index(interactions, n_user).to(device)
+        
+        # 儲存到全域變數
+        _cached_model_heur10 = model
+        _cached_edge_index_heur10 = edge_index
+        _cached_n_user = n_user
+        _cached_n_item = n_item
+        
+        os.chdir(original_dir)
+        print(f"Heuristic 10 Epoch 模型初始化完成 - 用戶: {n_user}, 物品: {n_item}, 邊數: {edge_index.shape[1]}")
+        return True
+        
+    except Exception as e:
+        print(f"Heuristic 10 Epoch 模型初始化失敗: {str(e)}")
+        import traceback
+        print(f"詳細錯誤: {traceback.format_exc()}")
+        if 'original_dir' in locals():
+            os.chdir(original_dir)
+        return False
+
+def initialize_heuristic_20epoch_model():
+    global _cached_model_heur20, _cached_edge_index_heur20, _cached_n_user, _cached_n_item
+    
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 載入映射信息
+        with open('mapping/uid_map.pkl', 'rb') as f:
+            uid_map = pickle.load(f)
+        with open('mapping/mid_map.pkl', 'rb') as f:
+            mid_map = pickle.load(f)
+        
+        n_user = len(uid_map)
+        n_item = len(mid_map)
+        
+        # 載入 embeddings
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_emb = torch.load("model/RS/user_emb_heuristic_20epoch.pt", map_location=device, weights_only=True)
+        item_emb = torch.load("model/RS/item_emb_heuristic_20epoch.pt", map_location=device, weights_only=True)
+        
+        # 創建 heuristic 20 epoch 模型
+        model = LightGCN(n_user, n_item, emb_size=64, n_layers=2).to(device)
+        combined_emb = torch.cat([user_emb, item_emb], dim=0)
+        model.embedding.weight.data = combined_emb
+        
+        # 建立 edge index
+        train_df = pd.read_csv('data/train.dat', sep=',', names=['user_id', 'movie_id', 'rating', 'timestamp'])
+        interactions = [(row['user_id'], row['movie_id']) for _, row in train_df.iterrows()]
+        edge_index = build_edge_index(interactions, n_user).to(device)
+        
+        # 儲存到全域變數
+        _cached_model_heur20 = model
+        _cached_edge_index_heur20 = edge_index
+        _cached_n_user = n_user
+        _cached_n_item = n_item
+        
+        os.chdir(original_dir)
+        print(f"Heuristic 20 Epoch 模型初始化完成 - 用戶: {n_user}, 物品: {n_item}, 邊數: {edge_index.shape[1]}")
+        return True
+        
+    except Exception as e:
+        print(f"Heuristic 20 Epoch 模型初始化失敗: {str(e)}")
+        import traceback
+        print(f"詳細錯誤: {traceback.format_exc()}")
         if 'original_dir' in locals():
             os.chdir(original_dir)
         return False
@@ -161,7 +267,7 @@ def update_embeddings_after_like(user_id, movie_id):
     global _cached_model, _cached_edge_index, _cached_n_user
     
     if _cached_model is None:
-        print("⚠️ 模型未初始化")
+        print("模型未初始化")
         return None, None
     
     try:
@@ -176,20 +282,96 @@ def update_embeddings_after_like(user_id, movie_id):
         updated_edge_index = torch.cat([_cached_edge_index, new_edges], dim=1)
         updated_edge_index = torch.unique(updated_edge_index, dim=1)
         
-        # 🎯 您說的：直接執行這個 function！
+        # 您說的：直接執行這個 function！
         with torch.no_grad():
             new_user_emb, new_item_emb = _cached_model.get_user_item(updated_edge_index)
         
         # 更新快取
         _cached_edge_index = updated_edge_index
         
-        print(f"✅ 直接執行 get_user_item() 完成！用戶{user_id}喜歡電影{movie_id}")
+        print(f"直接執行 get_user_item() 完成！用戶{user_id}喜歡電影{movie_id}")
         return new_user_emb, new_item_emb
         
     except Exception as e:
-        print(f"❌ 更新失敗: {str(e)}")
+        print(f"更新失敗: {str(e)}")
         import traceback
-        print(f"❌ 詳細錯誤: {traceback.format_exc()}")
+        print(f"詳細錯誤: {traceback.format_exc()}")
+        return None, None
+
+def update_embeddings_after_like_heur10(user_id, movie_id):
+    """
+    Heuristic 10 Epoch 版本：點讚後直接更新並重新計算
+    """
+    global _cached_model_heur10, _cached_edge_index_heur10, _cached_n_user
+    
+    if _cached_model_heur10 is None:
+        print("Heuristic 10 Epoch 模型未初始化")
+        return None, None
+    
+    try:
+        # 添加新邊
+        device = _cached_edge_index_heur10.device
+        new_edges = torch.tensor([
+            [user_id, movie_id + _cached_n_user],
+            [movie_id + _cached_n_user, user_id]
+        ], device=device).t()
+        
+        # 更新 edge_index
+        updated_edge_index = torch.cat([_cached_edge_index_heur10, new_edges], dim=1)
+        updated_edge_index = torch.unique(updated_edge_index, dim=1)
+        
+        # 直接執行 get_user_item
+        with torch.no_grad():
+            new_user_emb, new_item_emb = _cached_model_heur10.get_user_item(updated_edge_index)
+        
+        # 更新快取
+        _cached_edge_index_heur10 = updated_edge_index
+        
+        print(f"Heuristic 10 Epoch 直接執行 get_user_item() 完成！用戶{user_id}喜歡電影{movie_id}")
+        return new_user_emb, new_item_emb
+        
+    except Exception as e:
+        print(f"Heuristic 10 Epoch 更新失敗: {str(e)}")
+        import traceback
+        print(f"詳細錯誤: {traceback.format_exc()}")
+        return None, None
+
+def update_embeddings_after_like_heur20(user_id, movie_id):
+    """
+    Heuristic 20 Epoch 版本：點讚後直接更新並重新計算
+    """
+    global _cached_model_heur20, _cached_edge_index_heur20, _cached_n_user
+    
+    if _cached_model_heur20 is None:
+        print("Heuristic 20 Epoch 模型未初始化")
+        return None, None
+    
+    try:
+        # 添加新邊
+        device = _cached_edge_index_heur20.device
+        new_edges = torch.tensor([
+            [user_id, movie_id + _cached_n_user],
+            [movie_id + _cached_n_user, user_id]
+        ], device=device).t()
+        
+        # 更新 edge_index
+        updated_edge_index = torch.cat([_cached_edge_index_heur20, new_edges], dim=1)
+        updated_edge_index = torch.unique(updated_edge_index, dim=1)
+        
+        # 直接執行 get_user_item
+        with torch.no_grad():
+            new_user_emb, new_item_emb = _cached_model_heur20.get_user_item(updated_edge_index)
+        
+        # 更新快取
+        _cached_edge_index_heur20 = updated_edge_index
+        
+        print(f"Heuristic 20 Epoch 直接執行 get_user_item() 完成！用戶{user_id}喜歡電影{movie_id}")
+        return new_user_emb, new_item_emb
+        
+    except Exception as e:
+        print(f"Heuristic 20 Epoch 更新失敗: {str(e)}")
+        import traceback
+        print(f"詳細錯誤: {traceback.format_exc()}")
         return None, None
 
 def get_dynamic_recommendations(user_id, num_recommendations=20, exclude_ids=None):
@@ -198,6 +380,46 @@ def get_dynamic_recommendations(user_id, num_recommendations=20, exclude_ids=Non
     """
     # 先嘗試獲取更新後的 embeddings
     user_emb, item_emb = update_embeddings_after_like(user_id, 0)  # dummy call to get current embeddings
+    
+    if user_emb is None:
+        return None, None
+    
+    with torch.no_grad():
+        user_vec = user_emb[user_id].unsqueeze(0)
+        scores = torch.mm(user_vec, item_emb.t()).squeeze()
+        
+        if exclude_ids:
+            scores[exclude_ids] = -float('inf')
+        
+        top_scores, top_items = torch.topk(scores, num_recommendations)
+        return top_items.cpu().numpy(), top_scores.cpu().numpy()
+
+def get_dynamic_recommendations_heur10(user_id, num_recommendations=20, exclude_ids=None):
+    """
+    使用 Heuristic 10 Epoch 動態更新的 embeddings 生成推薦
+    """
+    # 先嘗試獲取更新後的 embeddings
+    user_emb, item_emb = update_embeddings_after_like_heur10(user_id, 0)  # dummy call to get current embeddings
+    
+    if user_emb is None:
+        return None, None
+    
+    with torch.no_grad():
+        user_vec = user_emb[user_id].unsqueeze(0)
+        scores = torch.mm(user_vec, item_emb.t()).squeeze()
+        
+        if exclude_ids:
+            scores[exclude_ids] = -float('inf')
+        
+        top_scores, top_items = torch.topk(scores, num_recommendations)
+        return top_items.cpu().numpy(), top_scores.cpu().numpy()
+
+def get_dynamic_recommendations_heur20(user_id, num_recommendations=20, exclude_ids=None):
+    """
+    使用 Heuristic 20 Epoch 動態更新的 embeddings 生成推薦
+    """
+    # 先嘗試獲取更新後的 embeddings
+    user_emb, item_emb = update_embeddings_after_like_heur20(user_id, 0)  # dummy call to get current embeddings
     
     if user_emb is None:
         return None, None
@@ -350,8 +572,8 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
         users_info = load_user_info()
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        user_embeddings = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
-        item_embeddings = torch.load("model/RS/item_emb.pt", map_location=device, weights_only=True)
+        user_embeddings = torch.load("model/RS/user_emb_heuristic.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_heuristic.pt", map_location=device, weights_only=True)
         
         # 载入映射文件
         uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
@@ -389,7 +611,7 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
             # 顯示用戶信息
             user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
             if user_info:
-                output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
+                output_container.subheader(f"用戶 {target_user_id} 的詳細信息")
                 # 使用表格形式確保完整顯示
                 import pandas as pd
                 user_data = pd.DataFrame({
@@ -400,7 +622,7 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
                 })
                 output_container.dataframe(user_data, use_container_width=True, hide_index=True)
 
-            output_container.subheader(f"🎯 為用戶 {target_user_id} 的 Heuristic 推薦結果")
+            output_container.subheader(f"為用戶 {target_user_id} 的 Heuristic 推薦結果")
             
             # 創建詳細的推薦結果表格
             recommendations_data = []
@@ -465,12 +687,12 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
                 with col5:
                     output_container.write(f"{score:.4f}")
                 with col6:
-                    if output_container.button("❤️", key=f"heart_{target_user_id}_{i}", help="加入我的最愛"):
+                    if output_container.button("加入最愛", key=f"heart_{target_user_id}_{i}", help="加入我的最愛"):
                         # 添加到用戶交互記錄，直接使用原始電影ID
                         success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
                         
                         if success:
-                            output_container.success(f"❤️ 已將《{movie_title}》添加到交互記錄！")
+                            output_container.success(f"已將《{movie_title}》添加到交互記錄！")
                             # 更新 session_state 中的交互記錄
                             import streamlit as st
                             if 'recommendations_data' in st.session_state:
@@ -479,11 +701,11 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
                                 st.session_state.recommendations_data['user_interactions_df'] = updated_interactions_df
                                 st.session_state.recommendations_data['watched_movie_ids'] = updated_watched_ids
                         else:
-                            output_container.error("❌ 添加失敗，請稍後再試")
+                            output_container.error("添加失敗，請稍後再試")
             
             # 顯示用戶歷史交互記錄
             if not user_interactions_df.empty:
-                output_container.subheader(f"📚 用戶 {target_user_id} 的歷史交互記錄")
+                output_container.subheader(f"用戶 {target_user_id} 的歷史交互記錄")
                 output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
                 
                 # 按時間戳降序排列
@@ -493,7 +715,7 @@ def run_heuristic_exposure(output_container=None, target_user_id=None, num_recom
                 output_container.dataframe(sorted_interactions, use_container_width=True)
                 
                 # 顯示統計信息
-                output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
+                output_container.info(f"共 {len(sorted_interactions)} 條交互記錄")
             else:
                 output_container.warning("該用戶沒有歷史交互記錄")
         
@@ -515,15 +737,36 @@ def check_model_dependencies():
         if not RL_RECOMMENDER_PATH.exists():
             return False, f"RL_recommender 目錄不存在: {RL_RECOMMENDER_PATH}"
         
-        # 檢查模型文件
-        user_emb_file = RL_RECOMMENDER_PATH / "model" / "RS" / "user_emb.pt"
-        item_emb_file = RL_RECOMMENDER_PATH / "model" / "RS" / "item_emb.pt"
+        # 檢查所有模型文件（四組完整的嵌入文件）
+        user_emb_heur_file = RL_RECOMMENDER_PATH / "model" / "RS" / "user_emb_heuristic.pt"
+        item_emb_heur_file = RL_RECOMMENDER_PATH / "model" / "RS" / "item_emb_heuristic.pt"
+        user_emb_heur20_file = RL_RECOMMENDER_PATH / "model" / "RS" / "user_emb_heuristic_20epoch.pt"
+        item_emb_heur20_file = RL_RECOMMENDER_PATH / "model" / "RS" / "item_emb_heuristic_20epoch.pt"
+        user_emb_raw_file = RL_RECOMMENDER_PATH / "model" / "RS" / "user_emb_raw.pt"
+        item_emb_raw_file = RL_RECOMMENDER_PATH / "model" / "RS" / "item_emb_raw.pt"
+        user_emb_raw20_file = RL_RECOMMENDER_PATH / "model" / "RS" / "user_emb_raw_20epoch.pt"
+        item_emb_raw20_file = RL_RECOMMENDER_PATH / "model" / "RS" / "item_emb_raw_20epoch.pt"
         
-        if not user_emb_file.exists():
-            return False, f"用戶嵌入文件不存在: {user_emb_file}"
+        missing_files = []
+        if not user_emb_heur_file.exists():
+            missing_files.append(f"用戶 Heuristic 嵌入文件: {user_emb_heur_file}")
+        if not item_emb_heur_file.exists():
+            missing_files.append(f"項目 Heuristic 嵌入文件: {item_emb_heur_file}")
+        if not user_emb_heur20_file.exists():
+            missing_files.append(f"用戶 Heuristic 20 Epoch 嵌入文件: {user_emb_heur20_file}")
+        if not item_emb_heur20_file.exists():
+            missing_files.append(f"項目 Heuristic 20 Epoch 嵌入文件: {item_emb_heur20_file}")
+        if not user_emb_raw_file.exists():
+            missing_files.append(f"用戶 Raw 嵌入文件: {user_emb_raw_file}")
+        if not item_emb_raw_file.exists():
+            missing_files.append(f"項目 Raw 嵌入文件: {item_emb_raw_file}")
+        if not user_emb_raw20_file.exists():
+            missing_files.append(f"用戶 Raw 20 Epoch 嵌入文件: {user_emb_raw20_file}")
+        if not item_emb_raw20_file.exists():
+            missing_files.append(f"項目 Raw 20 Epoch 嵌入文件: {item_emb_raw20_file}")
             
-        if not item_emb_file.exists():
-            return False, f"項目嵌入文件不存在: {item_emb_file}"
+        if missing_files:
+            return False, f"以下嵌入文件不存在: {'; '.join(missing_files)}"
         
         return True, "所有依賴檢查通過"
         
@@ -552,7 +795,7 @@ def get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map):
         
         # 2️⃣ 直接從 /data 目錄讀取歷史交互資料
         else:
-            print(f"📁 從 /data 目錄讀取用戶 {target_user_id} 的歷史交互記錄")
+            print(f"從 /data 目錄讀取用戶 {target_user_id} 的歷史交互記錄")
             
             # 讀取所有數據文件
             data_files = ['train.dat', 'val.dat', 'test.dat']
@@ -566,12 +809,12 @@ def get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map):
                         user_data = df[df['user_id'] == target_user_id]
                         if not user_data.empty:
                             all_interactions.append(user_data)
-                            print(f"✅ 從 {data_file} 中找到 {len(user_data)} 條記錄")
+                            print(f"從 {data_file} 中找到 {len(user_data)} 條記錄")
                     except Exception as e:
-                        print(f"⚠️ 讀取 {data_file} 失敗: {str(e)}")
+                        print(f"讀取 {data_file} 失敗: {str(e)}")
             
             if not all_interactions:
-                print(f"📭 用戶 {target_user_id} 沒有任何歷史交互記錄")
+                print(f"用戶 {target_user_id} 沒有任何歷史交互記錄")
                 return pd.DataFrame(columns=['Movie_ID', 'Title', 'Genres', 'Rating', 'Timestamp']), []
             
             # 合併所有交互記錄
@@ -604,14 +847,14 @@ def get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map):
                     watched_movie_ids.append(mapped_movie_id)
             
             user_interactions_df = pd.DataFrame(user_interactions_data)
-            print(f"📊 用戶 {target_user_id} 總共有 {len(user_interactions_df)} 條歷史交互記錄")
+            print(f"用戶 {target_user_id} 總共有 {len(user_interactions_df)} 條歷史交互記錄")
             
             return user_interactions_df, watched_movie_ids
             
     except Exception as e:
-        print(f"❌ 獲取用戶交互記錄失敗: {str(e)}")
+        print(f"獲取用戶交互記錄失敗: {str(e)}")
         import traceback
-        print(f"❌ 詳細錯誤: {traceback.format_exc()}")
+        print(f"詳細錯誤: {traceback.format_exc()}")
         return pd.DataFrame(columns=['Movie_ID', 'Title', 'Genres', 'Rating', 'Timestamp']), []
 
 def add_to_liked_movies(user_id, movie_info, liked_movies_file):
@@ -662,11 +905,11 @@ def get_user_liked_movies(user_id):
 
 def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map):
     try:
-        print(f"🔍 開始處理: 用戶{user_id}, 原始電影ID{original_movie_id}")
+        print(f"開始處理: 用戶{user_id}, 原始電影ID{original_movie_id}")
         
         original_dir = os.getcwd()
         os.chdir(RL_RECOMMENDER_PATH)
-        print(f"📁 切換到目錄: {RL_RECOMMENDER_PATH}")
+        print(f"切換到目錄: {RL_RECOMMENDER_PATH}")
         
         train_file = "data/train.dat"
         
@@ -676,29 +919,41 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
         
         mapped_movie_id = mid_map.get(original_movie_id)
         if mapped_movie_id is None:
-            print(f"❌ 原始電影ID {original_movie_id} 不在映射中")
+            print(f"原始電影ID {original_movie_id} 不在映射中")
             os.chdir(original_dir)
             return False
         
-        print(f"✅ 電影ID映射成功: 原始ID{original_movie_id} -> 映射ID{mapped_movie_id}")
+        print(f"電影ID映射成功: 原始ID{original_movie_id} -> 映射ID{mapped_movie_id}")
         
         current_timestamp = int(datetime.now().timestamp())
         new_interaction = f"{user_id},{mapped_movie_id},5,{current_timestamp}\n"
-        print(f"📝 新交互記錄: {new_interaction.strip()}")
+        print(f"新交互記錄: {new_interaction.strip()}")
         
         with open(train_file, 'a', encoding='utf-8') as f:
             f.write(new_interaction)
-        print(f"✅ 已添加到 {train_file}")
+        print(f"已添加到 {train_file}")
         
-        # 🎯 超簡化版：直接調用 get_user_item()
+        # 超簡化版：直接調用 get_user_item()
         try:
+           
             new_user_emb, new_item_emb = update_embeddings_after_like(user_id, mapped_movie_id)
             if new_user_emb is not None:
-                print(f"🎉 直接執行 get_user_item() 成功！")
-            else:
-                print(f"⚠️ 動態更新失敗，但數據已保存")
+                print(f"原始 Heuristic 直接執行 get_user_item() 成功！")
+            
+            # 更新 10 epoch 模型
+            new_user_emb_10, new_item_emb_10 = update_embeddings_after_like_heur10(user_id, mapped_movie_id)
+            if new_user_emb_10 is not None:
+                print(f"Heuristic 10 Epoch 直接執行 get_user_item() 成功！")
+            
+            # 更新 20 epoch 模型
+            new_user_emb_20, new_item_emb_20 = update_embeddings_after_like_heur20(user_id, mapped_movie_id)
+            if new_user_emb_20 is not None:
+                print(f"Heuristic 20 Epoch 直接執行 get_user_item() 成功！")
+            
+            if new_user_emb is None and new_user_emb_10 is None and new_user_emb_20 is None:
+                print(f"所有動態更新失敗，但數據已保存")
         except Exception as embed_error:
-            print(f"⚠️ 動態更新遇到問題: {str(embed_error)}")
+            print(f"動態更新遇到問題: {str(embed_error)}")
         
         interaction_file = f"interaction_collect/user_{user_id}_interactions.csv"
         
@@ -715,24 +970,364 @@ def add_movie_to_interactions(user_id, original_movie_id, movie_info, reverse_ui
             if original_movie_id not in existing_df['Movie_ID'].values:
                 updated_df = pd.concat([new_record, existing_df], ignore_index=True)
                 updated_df.to_csv(interaction_file, index=False)
-                print(f"✅ 已更新用戶交互文件: {interaction_file}")
+                print(f"已更新用戶交互文件: {interaction_file}")
             else:
-                print(f"⚠️ 電影已存在於用戶交互記錄中")
+                print(f"電影已存在於用戶交互記錄中")
         else:
             new_record.to_csv(interaction_file, index=False)
-            print(f"✅ 已創建新的用戶交互文件: {interaction_file}")
+            print(f"已創建新的用戶交互文件: {interaction_file}")
         
         os.chdir(original_dir)
-        print(f"🎉 處理完成，返回成功")
+        print(f"處理完成，返回成功")
         return True
         
     except Exception as e:
-        print(f"❌ 添加電影到交互記錄失敗: {str(e)}")
-        print(f"❌ 錯誤類型: {type(e).__name__}")
+        print(f"添加電影到交互記錄失敗: {str(e)}")
+        print(f"錯誤類型: {type(e).__name__}")
         import traceback
-        print(f"❌ 詳細錯誤: {traceback.format_exc()}")
+        print(f"詳細錯誤: {traceback.format_exc()}")
         os.chdir(original_dir)
         return False
+
+def run_heuristic_10epoch_exposure(output_container=None, target_user_id=None, num_recommendations=20):
+    """
+    運行 Heuristic 10 Epoch 模型 - 使用 user embedding 和 10 epoch item embedding
+    """
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 載入用戶和電影信息
+        movies_info = load_movie_info()
+        users_info = load_user_info()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_embeddings = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_heuristic.pt", map_location=device, weights_only=True)
+        
+        # 载入映射文件
+        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
+        
+        if not mapping_success:
+            error_msg = "無法載入映射文件"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        
+        # 獲取用戶歷史交互記錄，以便過濾推薦
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
+        # 檢查用戶ID是否有效
+        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        
+        # 為特定用戶生成推薦，並排除已觀看電影
+        recommended_items, scores = get_user_recommendations(
+            user_embeddings, item_embeddings, target_user_id, num_recommendations,
+            exclude_ids=watched_movie_ids
+        )
+        
+        # 切換回原目錄
+        os.chdir(original_dir)
+        
+        if output_container:
+            output_container.success("Heuristic 10 Epoch 推薦完成！")
+            
+            # 顯示用戶信息
+            user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
+            if user_info:
+                output_container.subheader(f"用戶 {target_user_id} 的詳細信息")
+                # 使用表格形式確保完整顯示
+                import pandas as pd
+                user_data = pd.DataFrame({
+                    '性別': [user_info['gender']],
+                    '年齡': [user_info['age']],
+                    '職業': [user_info['occupation']],
+                    '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
+                })
+                output_container.dataframe(user_data, use_container_width=True, hide_index=True)
+
+            output_container.subheader(f"為用戶 {target_user_id} 的 Heuristic 10 Epoch 推薦結果")
+            
+            # 創建詳細的推薦結果表格
+            recommendations_data = []
+            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
+                movie_title = movie_info.get('title', '未知電影')
+                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                
+                recommendations_data.append({
+                    '排名': i + 1,
+                    '電影ID': original_movie_id,
+                    '電影名稱': movie_title,
+                    '類型': movie_genres,
+                    '推薦分數': f"{score:.4f}"
+                })
+            
+            recommendations_df = pd.DataFrame(recommendations_data)
+            
+            # 添加表格標題
+            col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
+            with col1:
+                output_container.write("**排名**")
+            with col2:
+                output_container.write("**電影ID**")
+            with col3:
+                output_container.write("**電影名稱**")
+            with col4:
+                output_container.write("**類型**")
+            with col5:
+                output_container.write("**推薦分數**")
+            with col6:
+                output_container.write("**喜愛**")
+            
+            output_container.write("---")
+            
+            # 顯示推薦結果表格，並為每行添加愛心按鈕
+            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
+                movie_title = movie_info.get('title', '未知電影')
+                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                
+                col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 1])
+                
+                with col1:
+                    output_container.write(f"**{i+1}**")
+                with col2:
+                    output_container.write(f"{original_movie_id}")  # 顯示原始電影ID
+                with col3:
+                    output_container.write(f"**{movie_title}**")
+                with col4:
+                    output_container.write(f"{movie_genres}")
+                with col5:
+                    output_container.write(f"{score:.4f}")
+                with col6:
+                    if output_container.button("加入最愛", key=f"heur10_heart_{target_user_id}_{i}", help="加入我的最愛"):
+                        # 添加到用戶交互記錄，直接使用原始電影ID
+                        success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
+                        
+                        if success:
+                            output_container.success(f"已將《{movie_title}》添加到交互記錄！")
+                            # 更新 session_state 中的交互記錄
+                            import streamlit as st
+                            if 'heuristic_10epoch_data' in st.session_state:
+                                # 重新獲取更新後的交互記錄
+                                updated_interactions_df, updated_watched_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+                                st.session_state.heuristic_10epoch_data['user_interactions_df'] = updated_interactions_df
+                                st.session_state.heuristic_10epoch_data['watched_movie_ids'] = updated_watched_ids
+                        else:
+                            output_container.error("添加失敗，請稍後再試")
+            
+            # 顯示用戶歷史交互記錄
+            if not user_interactions_df.empty:
+                output_container.subheader(f"用戶 {target_user_id} 的歷史交互記錄")
+                output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
+                
+                # 按時間戳降序排列
+                sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
+                
+                # 顯示所有交互記錄
+                output_container.dataframe(sorted_interactions, use_container_width=True)
+                
+                # 顯示統計信息
+                output_container.info(f"共 {len(sorted_interactions)} 條交互記錄")
+            else:
+                output_container.warning("該用戶沒有歷史交互記錄")
+        
+        return f"成功為用戶 {target_user_id} 生成了 {len(recommended_items)} 部推薦電影"
+        
+    except Exception as e:
+        error_msg = f"Heuristic 10 Epoch 推薦執行出錯: {str(e)}"
+        if output_container:
+            output_container.error(error_msg)
+        os.chdir(original_dir)
+        return error_msg
+
+def run_heuristic_20epoch_exposure(output_container=None, target_user_id=None, num_recommendations=20):
+    """
+    運行 Heuristic 20 Epoch 模型 - 使用 user embedding 和 20 epoch item embedding
+    """
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 載入用戶和電影信息
+        movies_info = load_movie_info()
+        users_info = load_user_info()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_embeddings = torch.load("model/RS/user_emb_heuristic_20epoch.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_heuristic_20epoch.pt", map_location=device, weights_only=True)
+        
+        # 载入映射文件
+        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
+        
+        if not mapping_success:
+            error_msg = "無法載入映射文件"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        
+        # 獲取用戶歷史交互記錄，以便過濾推薦
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
+        # 檢查用戶ID是否有效
+        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        
+        # 為特定用戶生成推薦，並排除已觀看電影
+        recommended_items, scores = get_user_recommendations(
+            user_embeddings, item_embeddings, target_user_id, num_recommendations,
+            exclude_ids=watched_movie_ids
+        )
+        
+        # 切換回原目錄
+        os.chdir(original_dir)
+        
+        if output_container:
+            output_container.success("Heuristic 20 Epoch 推薦完成！")
+            
+            # 顯示用戶信息
+            user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
+            if user_info:
+                output_container.subheader(f"用戶 {target_user_id} 的詳細信息")
+                # 使用表格形式確保完整顯示
+                import pandas as pd
+                user_data = pd.DataFrame({
+                    '性別': [user_info['gender']],
+                    '年齡': [user_info['age']],
+                    '職業': [user_info['occupation']],
+                    '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
+                })
+                output_container.dataframe(user_data, use_container_width=True, hide_index=True)
+
+            output_container.subheader(f"為用戶 {target_user_id} 的 Heuristic 20 Epoch 推薦結果")
+            
+            # 創建詳細的推薦結果表格
+            recommendations_data = []
+            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
+                movie_title = movie_info.get('title', '未知電影')
+                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                
+                recommendations_data.append({
+                    '排名': i + 1,
+                    '電影ID': original_movie_id,
+                    '電影名稱': movie_title,
+                    '類型': movie_genres,
+                    '推薦分數': f"{score:.4f}"
+                })
+            
+            recommendations_df = pd.DataFrame(recommendations_data)
+            
+            # 添加表格標題
+            col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
+            with col1:
+                output_container.write("**排名**")
+            with col2:
+                output_container.write("**電影ID**")
+            with col3:
+                output_container.write("**電影名稱**")
+            with col4:
+                output_container.write("**類型**")
+            with col5:
+                output_container.write("**推薦分數**")
+            with col6:
+                output_container.write("**喜愛**")
+            
+            output_container.write("---")
+            
+            # 顯示推薦結果表格，並為每行添加愛心按鈕
+            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
+                movie_title = movie_info.get('title', '未知電影')
+                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                
+                col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 1])
+                
+                with col1:
+                    output_container.write(f"**{i+1}**")
+                with col2:
+                    output_container.write(f"{original_movie_id}")  # 顯示原始電影ID
+                with col3:
+                    output_container.write(f"**{movie_title}**")
+                with col4:
+                    output_container.write(f"{movie_genres}")
+                with col5:
+                    output_container.write(f"{score:.4f}")
+                with col6:
+                    if output_container.button("加入最愛", key=f"heur20_heart_{target_user_id}_{i}", help="加入我的最愛"):
+                        # 添加到用戶交互記錄，直接使用原始電影ID
+                        success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
+                        
+                        if success:
+                            output_container.success(f"已將《{movie_title}》添加到交互記錄！")
+                            # 更新 session_state 中的交互記錄
+                            import streamlit as st
+                            if 'heuristic_20epoch_data' in st.session_state:
+                                # 重新獲取更新後的交互記錄
+                                updated_interactions_df, updated_watched_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+                                st.session_state.heuristic_20epoch_data['user_interactions_df'] = updated_interactions_df
+                                st.session_state.heuristic_20epoch_data['watched_movie_ids'] = updated_watched_ids
+                        else:
+                            output_container.error("添加失敗，請稍後再試")
+            
+            # 顯示用戶歷史交互記錄
+            if not user_interactions_df.empty:
+                output_container.subheader(f"用戶 {target_user_id} 的歷史交互記錄")
+                output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
+                
+                # 按時間戳降序排列
+                sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
+                
+                # 顯示所有交互記錄
+                output_container.dataframe(sorted_interactions, use_container_width=True)
+                
+                # 顯示統計信息
+                output_container.info(f"共 {len(sorted_interactions)} 條交互記錄")
+            else:
+                output_container.warning("該用戶沒有歷史交互記錄")
+        
+        return f"成功為用戶 {target_user_id} 生成了 {len(recommended_items)} 部推薦電影"
+        
+    except Exception as e:
+        error_msg = f"Heuristic 20 Epoch 推薦執行出錯: {str(e)}"
+        if output_container:
+            output_container.error(error_msg)
+        os.chdir(original_dir)
+        return error_msg
 
 def get_recommendations_data(target_user_id, num_recommendations=20):
     try:
@@ -743,8 +1338,8 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
         users_info = load_user_info()
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        user_embeddings = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
-        item_embeddings = torch.load("model/RS/item_emb.pt", map_location=device, weights_only=True)
+        user_embeddings = torch.load("model/RS/user_emb_heuristic.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_heuristic.pt", map_location=device, weights_only=True)
         
         uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
         
@@ -752,15 +1347,15 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
             os.chdir(original_dir)
             return None, "無法載入映射文件"
         
-        # 🎯 簡化版：初始化模型（隊友建議的功能）
+        # 簡化版：初始化模型（隊友建議的功能）
         try:
             if initialize_model_for_dynamic_updates():
-                print("🎯 模型初始化成功，支援動態更新")
+                print("模型初始化成功，支援動態更新")
             else:
-                print("⚠️ 模型初始化失敗，使用原始方法")
+                print("模型初始化失敗，使用原始方法")
                 
         except Exception as cache_error:
-            print(f"⚠️ 模型初始化失敗: {str(cache_error)}")
+            print(f"模型初始化失敗: {str(cache_error)}")
         
         user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
         
@@ -769,13 +1364,13 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
             os.chdir(original_dir)
             return None, error_msg
         
-        # 🔄 嘗試使用動態更新的 embeddings
+        # 嘗試使用動態更新的 embeddings
         try:
             recommended_items, scores = get_dynamic_recommendations(
                 target_user_id, num_recommendations, exclude_ids=watched_movie_ids
             )
             if recommended_items is not None:
-                print("✅ 使用動態更新的 embeddings 生成推薦")
+                print("使用動態更新的 embeddings 生成推薦")
             else:
                 raise Exception("動態推薦失敗")
         except:
@@ -783,7 +1378,7 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
                 user_embeddings, item_embeddings, target_user_id, num_recommendations,
                 exclude_ids=watched_movie_ids
             )
-            print("⚠️ 使用原始 embeddings 生成推薦")
+            print("使用原始 embeddings 生成推薦")
         
         recommendations_data = {
             'user_id': target_user_id,
@@ -803,6 +1398,357 @@ def get_recommendations_data(target_user_id, num_recommendations=20):
         
     except Exception as e:
         error_msg = f"推薦生成出錯: {str(e)}"
+        os.chdir(original_dir)
+        return None, error_msg
+
+def get_heuristic_10epoch_recommendations_data(target_user_id, num_recommendations=20):
+    """
+    獲取 Heuristic 10 Epoch 模型的推薦數據，但不顯示
+    """
+    try:
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        movies_info = load_movie_info()
+        users_info = load_user_info()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_embeddings = torch.load("model/RS/user_emb.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_heuristic.pt", map_location=device, weights_only=True)
+        
+        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
+        
+        if not mapping_success:
+            os.chdir(original_dir)
+            return None, "無法載入映射文件"
+        
+        # 初始化 Heuristic 10 Epoch 模型
+        try:
+            if initialize_heuristic_10epoch_model():
+                print("Heuristic 10 Epoch 模型初始化成功，支援動態更新")
+            else:
+                print("Heuristic 10 Epoch 模型初始化失敗，使用原始方法")
+        except Exception as cache_error:
+            print(f"Heuristic 10 Epoch 模型初始化失敗: {str(cache_error)}")
+        
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
+        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+            os.chdir(original_dir)
+            return None, error_msg
+        
+        # 嘗試使用動態更新的 embeddings
+        try:
+            recommended_items, scores = get_dynamic_recommendations_heur10(
+                target_user_id, num_recommendations, exclude_ids=watched_movie_ids
+            )
+            if recommended_items is not None:
+                print("使用 Heuristic 10 Epoch 動態更新的 embeddings 生成推薦")
+            else:
+                raise Exception("Heuristic 10 Epoch 動態推薦失敗")
+        except:
+            recommended_items, scores = get_user_recommendations(
+                user_embeddings, item_embeddings, target_user_id, num_recommendations,
+                exclude_ids=watched_movie_ids
+            )
+            print("使用 Heuristic 10 Epoch 原始 embeddings 生成推薦")
+        
+        recommendations_data = {
+            'user_id': target_user_id,
+            'recommended_items': recommended_items,
+            'scores': scores,
+            'movies_info': movies_info,
+            'users_info': users_info,
+            'user_interactions_df': user_interactions_df,
+            'watched_movie_ids': watched_movie_ids,
+            'reverse_uid_map': reverse_uid_map,
+            'reverse_mid_map': reverse_mid_map,
+            'user_embeddings': user_embeddings
+        }
+        
+        os.chdir(original_dir)
+        return recommendations_data, "成功生成推薦"
+        
+    except Exception as e:
+        error_msg = f"Heuristic 10 Epoch 推薦生成出錯: {str(e)}"
+        os.chdir(original_dir)
+        return None, error_msg
+
+def get_heuristic_20epoch_recommendations_data(target_user_id, num_recommendations=20):
+    """
+    獲取 Heuristic 20 Epoch 模型的推薦數據，但不顯示
+    """
+    try:
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        movies_info = load_movie_info()
+        users_info = load_user_info()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_embeddings = torch.load("model/RS/user_emb_heuristic_20epoch.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_heuristic_20epoch.pt", map_location=device, weights_only=True)
+        
+        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
+        
+        if not mapping_success:
+            os.chdir(original_dir)
+            return None, "無法載入映射文件"
+        
+        # 初始化 Heuristic 20 Epoch 模型
+        try:
+            if initialize_heuristic_20epoch_model():
+                print("Heuristic 20 Epoch 模型初始化成功，支援動態更新")
+            else:
+                print("Heuristic 20 Epoch 模型初始化失敗，使用原始方法")
+        except Exception as cache_error:
+            print(f"Heuristic 20 Epoch 模型初始化失敗: {str(cache_error)}")
+        
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
+        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+            os.chdir(original_dir)
+            return None, error_msg
+        
+        # 嘗試使用動態更新的 embeddings
+        try:
+            recommended_items, scores = get_dynamic_recommendations_heur20(
+                target_user_id, num_recommendations, exclude_ids=watched_movie_ids
+            )
+            if recommended_items is not None:
+                print("使用 Heuristic 20 Epoch 動態更新的 embeddings 生成推薦")
+            else:
+                raise Exception("Heuristic 20 Epoch 動態推薦失敗")
+        except:
+            recommended_items, scores = get_user_recommendations(
+                user_embeddings, item_embeddings, target_user_id, num_recommendations,
+                exclude_ids=watched_movie_ids
+            )
+            print("使用 Heuristic 20 Epoch 原始 embeddings 生成推薦")
+        
+        recommendations_data = {
+            'user_id': target_user_id,
+            'recommended_items': recommended_items,
+            'scores': scores,
+            'movies_info': movies_info,
+            'users_info': users_info,
+            'user_interactions_df': user_interactions_df,
+            'watched_movie_ids': watched_movie_ids,
+            'reverse_uid_map': reverse_uid_map,
+            'reverse_mid_map': reverse_mid_map,
+            'user_embeddings': user_embeddings
+        }
+        
+        os.chdir(original_dir)
+        return recommendations_data, "成功生成推薦"
+        
+    except Exception as e:
+        error_msg = f"Heuristic 20 Epoch 推薦生成出錯: {str(e)}"
+        os.chdir(original_dir)
+        return None, error_msg
+
+def run_raw_20epoch_exposure(output_container=None, target_user_id=None, num_recommendations=20):
+    """
+    運行 Raw 20 Epoch 模型 - 使用 raw 20 epoch embeddings
+    """
+    try:
+        # 切換到 RL_recommender 目錄
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        # 載入用戶和電影信息
+        movies_info = load_movie_info()
+        users_info = load_user_info()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_embeddings = torch.load("model/RS/user_emb_raw_20epoch.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_raw_20epoch.pt", map_location=device, weights_only=True)
+        
+        # 载入映射文件
+        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
+        
+        if not mapping_success:
+            error_msg = "無法載入映射文件"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        
+        # 獲取用戶歷史交互記錄，以便過濾推薦
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
+        # 檢查用戶ID是否有效
+        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+            if output_container:
+                output_container.error(error_msg)
+            os.chdir(original_dir)
+            return error_msg
+        
+        # 為特定用戶生成推薦，並排除已觀看電影
+        recommended_items, scores = get_user_recommendations(
+            user_embeddings, item_embeddings, target_user_id, num_recommendations,
+            exclude_ids=watched_movie_ids
+        )
+        
+        # 切換回原目錄
+        os.chdir(original_dir)
+        
+        if output_container:
+            output_container.success("Raw 20 Epoch 推薦完成！")
+            
+            # 顯示用戶信息
+            user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
+            if user_info:
+                output_container.subheader(f"用戶 {target_user_id} 的詳細信息")
+                # 使用表格形式確保完整顯示
+                import pandas as pd
+                user_data = pd.DataFrame({
+                    '性別': [user_info['gender']],
+                    '年齡': [user_info['age']],
+                    '職業': [user_info['occupation']],
+                    '歷史交互': [f"{len(watched_movie_ids)} 部電影"]
+                })
+                output_container.dataframe(user_data, use_container_width=True, hide_index=True)
+
+            output_container.subheader(f"為用戶 {target_user_id} 的 Raw 20 Epoch 推薦結果")
+            
+            # 添加表格標題
+            col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
+            with col1:
+                output_container.write("**排名**")
+            with col2:
+                output_container.write("**電影ID**")
+            with col3:
+                output_container.write("**電影名稱**")
+            with col4:
+                output_container.write("**類型**")
+            with col5:
+                output_container.write("**推薦分數**")
+            with col6:
+                output_container.write("**喜愛**")
+            
+            output_container.write("---")
+            
+            # 顯示推薦結果表格，並為每行添加愛心按鈕
+            for i, (item_id, score) in enumerate(zip(recommended_items, scores)):
+                # 正確的ID映射邏輯：將映射後的item_id轉換為原始電影ID
+                original_movie_id = reverse_mid_map.get(item_id)
+                if original_movie_id is None:
+                    continue  # 跳過無法映射的電影
+                
+                movie_info = movies_info.get(original_movie_id, {})
+                movie_title = movie_info.get('title', '未知電影')
+                movie_genres = ' | '.join(movie_info.get('genres', ['未知']))
+                
+                col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 1])
+                
+                with col1:
+                    output_container.write(f"**{i+1}**")
+                with col2:
+                    output_container.write(f"{original_movie_id}")  # 顯示原始電影ID
+                with col3:
+                    output_container.write(f"**{movie_title}**")
+                with col4:
+                    output_container.write(f"{movie_genres}")
+                with col5:
+                    output_container.write(f"{score:.4f}")
+                with col6:
+                    if output_container.button("加入最愛", key=f"raw20_heart_{target_user_id}_{i}", help="加入我的最愛"):
+                        # 添加到用戶交互記錄，直接使用原始電影ID
+                        success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
+                        
+                        if success:
+                            output_container.success(f"已將《{movie_title}》添加到交互記錄！")
+                            # 更新 session_state 中的交互記錄
+                            import streamlit as st
+                            if 'raw_20epoch_data' in st.session_state:
+                                # 重新獲取更新後的交互記錄
+                                updated_interactions_df, updated_watched_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+                                st.session_state.raw_20epoch_data['user_interactions_df'] = updated_interactions_df
+                                st.session_state.raw_20epoch_data['watched_movie_ids'] = updated_watched_ids
+                        else:
+                            output_container.error("添加失敗，請稍後再試")
+            
+            # 顯示用戶歷史交互記錄
+            if not user_interactions_df.empty:
+                output_container.subheader(f"用戶 {target_user_id} 的歷史交互記錄")
+                output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
+                
+                # 按時間戳降序排列
+                sorted_interactions = user_interactions_df.sort_values('Timestamp', ascending=False)
+                
+                # 顯示所有交互記錄
+                output_container.dataframe(sorted_interactions, use_container_width=True)
+                
+                # 顯示統計信息
+                output_container.info(f"共 {len(sorted_interactions)} 條交互記錄")
+            else:
+                output_container.warning("該用戶沒有歷史交互記錄")
+        
+        return f"成功為用戶 {target_user_id} 生成了 {len(recommended_items)} 部推薦電影"
+        
+    except Exception as e:
+        error_msg = f"Raw 20 Epoch 推薦執行出錯: {str(e)}"
+        if output_container:
+            output_container.error(error_msg)
+        os.chdir(original_dir)
+        return error_msg
+
+def get_raw_20epoch_recommendations_data(target_user_id, num_recommendations=20):
+    """
+    獲取 Raw 20 Epoch 模型的推薦數據，但不顯示
+    """
+    try:
+        original_dir = os.getcwd()
+        os.chdir(RL_RECOMMENDER_PATH)
+        
+        movies_info = load_movie_info()
+        users_info = load_user_info()
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        user_embeddings = torch.load("model/RS/user_emb_raw_20epoch.pt", map_location=device, weights_only=True)
+        item_embeddings = torch.load("model/RS/item_emb_raw_20epoch.pt", map_location=device, weights_only=True)
+        
+        uid_map, mid_map, reverse_uid_map, reverse_mid_map, mapping_success = load_mapping_files()
+        
+        if not mapping_success:
+            os.chdir(original_dir)
+            return None, "無法載入映射文件"
+        
+        user_interactions_df, watched_movie_ids = get_user_interactions(target_user_id, reverse_uid_map, reverse_mid_map)
+        
+        if target_user_id >= user_embeddings.shape[0] or target_user_id < 0:
+            error_msg = f"用戶ID {target_user_id} 超出範圍 (0-{user_embeddings.shape[0]-1})"
+            os.chdir(original_dir)
+            return None, error_msg
+        
+        # Raw 模型不需要動態更新，直接使用原始 embeddings
+        recommended_items, scores = get_user_recommendations(
+            user_embeddings, item_embeddings, target_user_id, num_recommendations,
+            exclude_ids=watched_movie_ids
+        )
+        
+        recommendations_data = {
+            'user_id': target_user_id,
+            'recommended_items': recommended_items,
+            'scores': scores,
+            'movies_info': movies_info,
+            'users_info': users_info,
+            'user_interactions_df': user_interactions_df,
+            'watched_movie_ids': watched_movie_ids,
+            'reverse_uid_map': reverse_uid_map,
+            'reverse_mid_map': reverse_mid_map,
+            'user_embeddings': user_embeddings
+        }
+        
+        os.chdir(original_dir)
+        return recommendations_data, "成功生成推薦"
+        
+    except Exception as e:
+        error_msg = f"Raw 20 Epoch 推薦生成出錯: {str(e)}"
         os.chdir(original_dir)
         return None, error_msg
 
@@ -848,7 +1794,7 @@ def display_recommendations(output_container, recommendations_data):
     # 顯示用戶信息
     user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
     if user_info:
-        output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
+        output_container.subheader(f"用戶 {target_user_id} 的詳細信息")
         
         # 職業代碼到名稱的映射
         occupation_map = {
@@ -870,7 +1816,7 @@ def display_recommendations(output_container, recommendations_data):
         })
         output_container.dataframe(user_data, use_container_width=True, hide_index=True)
 
-    output_container.subheader(f"🎯 為用戶 {target_user_id} 的 Heuristic 推薦結果")
+    output_container.subheader(f"為用戶 {target_user_id} 的 Heuristic 推薦結果")
     
     # 添加表格標題
     col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
@@ -913,12 +1859,12 @@ def display_recommendations(output_container, recommendations_data):
         with col5:
             output_container.write(f"{score:.4f}")
         with col6:
-            if output_container.button("❤️", key=f"heart_{target_user_id}_{i}", help="加入我的最愛"):
+            if output_container.button("加入最愛", key=f"heart_{target_user_id}_{i}", help="加入我的最愛"):
                 # 添加到用戶交互記錄，直接使用原始電影ID
                 success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
                 
                 if success:
-                    output_container.success(f"❤️ 已將《{movie_title}》添加到交互記錄！")
+                    output_container.success(f"已將《{movie_title}》添加到交互記錄！")
                     # 更新 session_state 中的交互記錄
                     import streamlit as st
                     if 'recommendations_data' in st.session_state:
@@ -927,11 +1873,11 @@ def display_recommendations(output_container, recommendations_data):
                         st.session_state.recommendations_data['user_interactions_df'] = updated_interactions_df
                         st.session_state.recommendations_data['watched_movie_ids'] = updated_watched_ids
                 else:
-                    output_container.error("❌ 添加失敗，請稍後再試")
+                    output_container.error("添加失敗，請稍後再試")
     
     # 顯示用戶歷史交互記錄
     if not user_interactions_df.empty:
-        output_container.subheader(f"📚 用戶 {target_user_id} 的歷史交互記錄")
+        output_container.subheader(f"用戶 {target_user_id} 的歷史交互記錄")
         output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
         
         # 按時間戳降序排列
@@ -941,13 +1887,13 @@ def display_recommendations(output_container, recommendations_data):
         output_container.dataframe(sorted_interactions, use_container_width=True)
         
         # 顯示統計信息
-        output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
+        output_container.info(f"共 {len(sorted_interactions)} 條交互記錄")
     else:
         output_container.warning("該用戶沒有歷史交互記錄")
 
     # 添加社群推薦功能
     output_container.markdown("---")
-    output_container.subheader("👥 社群推薦 - 看過類似電影的用戶推薦")
+    output_container.subheader("社群推薦 - 看過類似電影的用戶推薦")
     
     try:
         # 切換到 RL_recommender 目錄
@@ -963,7 +1909,7 @@ def display_recommendations(output_container, recommendations_data):
             watched_movies = get_user_watched_movies(similar_user_id, reverse_uid_map, reverse_mid_map, num_movies=5)
             
             if watched_movies:
-                output_container.subheader(f"🎬 用戶 {similar_user_id} 跟你看過類似的電影，所以你也可能喜歡看這些電影")
+                output_container.subheader(f"用戶 {similar_user_id} 跟你看過類似的電影，所以你也可能喜歡看這些電影")
                 output_container.info(f"相似度: {similarity_score:.4f}")
                 
                 # 創建推薦表格
@@ -1001,7 +1947,7 @@ def display_recommendations(output_container, recommendations_data):
                     with col4:
                         output_container.write(f"{movie_genres}")
                     with col5:
-                        output_container.write(f"⭐ {rating}")
+                        output_container.write(f"{rating} 星")
                 
                 if i < len(similar_users) - 1:  # 如果不是最後一個用戶，添加分隔線
                     output_container.markdown("---")
@@ -1107,7 +2053,7 @@ def display_simulator_recommendations(output_container, recommendations_data):
     # 顯示用戶信息
     user_info = users_info.get(target_user_id + 1, {})  # 用戶ID從1開始
     if user_info:
-        output_container.subheader(f"👤 用戶 {target_user_id} 的詳細信息")
+        output_container.subheader(f"用戶 {target_user_id} 的詳細信息")
         
         # 職業代碼到名稱的映射
         occupation_map = {
@@ -1129,7 +2075,7 @@ def display_simulator_recommendations(output_container, recommendations_data):
         })
         output_container.dataframe(user_data, use_container_width=True, hide_index=True)
 
-    output_container.subheader(f"🎯 為用戶 {target_user_id} 的 Simulator 推薦結果")
+    output_container.subheader(f"為用戶 {target_user_id} 的 Simulator 推薦結果")
     
     # 添加表格標題
     col1, col2, col3, col4, col5, col6 = output_container.columns([1, 1, 4, 3, 2, 3])
@@ -1172,12 +2118,12 @@ def display_simulator_recommendations(output_container, recommendations_data):
         with col5:
             output_container.write(f"{score:.4f}")
         with col6:
-            if output_container.button("❤️", key=f"sim_heart_{target_user_id}_{i}", help="加入我的最愛"):
+            if output_container.button("加入最愛", key=f"sim_heart_{target_user_id}_{i}", help="加入我的最愛"):
                 # 添加到用戶交互記錄，直接使用原始電影ID
                 success = add_movie_to_interactions(target_user_id, original_movie_id, movie_info, reverse_uid_map, reverse_mid_map)
                 
                 if success:
-                    output_container.success(f"❤️ 已將《{movie_title}》添加到交互記錄！")
+                    output_container.success(f"已將《{movie_title}》添加到交互記錄！")
                     # 更新 session_state 中的交互記錄
                     import streamlit as st
                     if 'simulator_recommendations_data' in st.session_state:
@@ -1186,11 +2132,11 @@ def display_simulator_recommendations(output_container, recommendations_data):
                         st.session_state.simulator_recommendations_data['user_interactions_df'] = updated_interactions_df
                         st.session_state.simulator_recommendations_data['watched_movie_ids'] = updated_watched_ids
                 else:
-                    output_container.error("❌ 添加失敗，請稍後再試")
+                    output_container.error("添加失敗，請稍後再試")
     
     # 顯示用戶歷史交互記錄
     if not user_interactions_df.empty:
-        output_container.subheader(f"📚 用戶 {target_user_id} 的歷史交互記錄")
+        output_container.subheader(f"用戶 {target_user_id} 的歷史交互記錄")
         output_container.info(f"數據已保存至: user_{target_user_id}_interactions.csv")
         
         # 按時間戳降序排列
@@ -1200,13 +2146,13 @@ def display_simulator_recommendations(output_container, recommendations_data):
         output_container.dataframe(sorted_interactions, use_container_width=True)
         
         # 顯示統計信息
-        output_container.info(f"📊 共 {len(sorted_interactions)} 條交互記錄")
+        output_container.info(f"共 {len(sorted_interactions)} 條交互記錄")
     else:
         output_container.warning("該用戶沒有歷史交互記錄")
 
     # 添加社群推薦功能
     output_container.markdown("---")
-    output_container.subheader("👥 社群推薦 - 看過類似電影的用戶推薦")
+    output_container.subheader("社群推薦 - 看過類似電影的用戶推薦")
     
     try:
         # 切換到 RL_recommender 目錄
@@ -1222,7 +2168,7 @@ def display_simulator_recommendations(output_container, recommendations_data):
             watched_movies = get_user_watched_movies(similar_user_id, reverse_uid_map, reverse_mid_map, num_movies=5)
             
             if watched_movies:
-                output_container.subheader(f"🎬 用戶 {similar_user_id} 跟你看過類似的電影，所以你也可能喜歡看這些電影")
+                output_container.subheader(f"用戶 {similar_user_id} 跟你看過類似的電影，所以你也可能喜歡看這些電影")
                 output_container.info(f"相似度: {similarity_score:.4f}")
                 
                 # 創建推薦表格
@@ -1260,7 +2206,7 @@ def display_simulator_recommendations(output_container, recommendations_data):
                     with col4:
                         output_container.write(f"{movie_genres}")
                     with col5:
-                        output_container.write(f"⭐ {rating}")
+                        output_container.write(f"{rating} 星")
                 
                 if i < len(similar_users) - 1:  # 如果不是最後一個用戶，添加分隔線
                     output_container.markdown("---")
